@@ -1,0 +1,52 @@
+{
+  "expo": {
+    "name": "DataLake Biometric",
+    "slug": "datalake-biometric",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0F172A",
+    "android": {
+      "package": "com.datalakebiometric",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "backgroundColor": "#0F172A"
+      },
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
+    },
+    "ios": {
+      "bundleIdentifier": "com.datalakebiometric",
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSCameraUsageDescription": "DataLake Biometric needs camera access to verify your identity."
+      }
+    },
+    "plugins": [
+      [
+        "react-native-vision-camera",
+        {
+          "cameraPermissionText": "DataLake Biometric needs camera access to verify your identity.",
+          "enableMicrophonePermission": false
+        }
+      ],
+      [
+        "react-native-fast-tflite",
+        {
+          "enableCoreMLDelegate": false
+        }
+      ]
+    ],
+    "assetBundlePatterns": [
+      "models/**",
+      "assets/**"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "8e758b91-efc5-4d78-80f7-096cbd252c82"
+      }
+    }
+  }
+}
