@@ -1,0 +1,13 @@
+diff --git a/node_modules/expo-modules-core/android/build.gradle b/node_modules/expo-modules-core/android/build.gradle
+index ffd50ba..f5ac24c 100644
+--- a/node_modules/expo-modules-core/android/build.gradle
++++ b/node_modules/expo-modules-core/android/build.gradle
+@@ -29,7 +29,7 @@ buildscript {
+     if (ext.has("kotlinVersion")) {
+       ext.kotlinVersion()
+     } else {
+-      ext.safeExtGet("kotlinVersion", "1.8.10")
++      ext.safeExtGet("kotlinVersion", "2.0.0")
+     }
+   }
+ 
