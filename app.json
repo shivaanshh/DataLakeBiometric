@@ -6,6 +6,9 @@
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0F172A",
+    "splash": {
+      "backgroundColor": "#0F172A"
+    },
     "android": {
       "package": "com.datalakebiometric",
       "versionCode": 1,
