@@ -28,6 +28,7 @@
       }
     },
     "plugins": [
+      "./plugins/withKotlinVersion",
       [
         "expo-build-properties",
         {
