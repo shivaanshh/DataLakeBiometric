@@ -1,24 +1,31 @@
 const { withProjectBuildGradle } = require('@expo/config-plugins');
 
 /**
- * Patches android/build.gradle to set ext.kotlinVersion = "2.0.0".
- * expo-build-properties writes kotlinVersion to gradle.properties instead,
- * but the Expo SDK 50 template reads it from build.gradle ext block.
+ * Forces kotlin-reflect to 1.8.0 across all subprojects via Gradle resolutionStrategy.
+ *
+ * Root cause: react-native-gradle-plugin (RN 0.73) locks the buildscript Kotlin compiler
+ * to 1.8.0 for the entire build. react-native-vision-camera and worklets-core pull in
+ * kotlin-reflect:2.0.0 as a transitive dep, which the 1.8.0 compiler cannot read.
+ * Forcing kotlin-reflect to 1.8.0 makes the compiler and library versions consistent.
  */
 module.exports = function withKotlinVersion(config) {
   return withProjectBuildGradle(config, (config) => {
-    const contents = config.modResults.contents;
-    if (contents.includes('kotlinVersion')) {
-      config.modResults.contents = contents.replace(
-        /kotlinVersion\s*=\s*["'][^"']*["']/,
-        'kotlinVersion = "2.0.0"'
-      );
-    } else {
-      // Inject into ext block if not found
-      config.modResults.contents = contents.replace(
-        /ext\s*\{/,
-        'ext {\n        kotlinVersion = "2.0.0"'
-      );
+    if (!config.modResults.contents.includes('forceKotlinReflect')) {
+      config.modResults.contents += `
+
+// forceKotlinReflect: pin kotlin-reflect to 1.8.0 so the Kotlin 1.8 compiler
+// (forced by react-native-gradle-plugin) can read its metadata.
+subprojects {
+    configurations.all {
+        resolutionStrategy {
+            force 'org.jetbrains.kotlin:kotlin-reflect:1.8.0'
+            force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.0'
+            force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.0'
+            force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.0'
+        }
+    }
+}
+`;
     }
     return config;
   });

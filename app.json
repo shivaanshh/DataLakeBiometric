@@ -29,14 +29,7 @@
     },
     "plugins": [
       "./plugins/withKotlinVersion",
-      [
-        "expo-build-properties",
-        {
-          "android": {
-            "kotlinVersion": "2.0.0"
-          }
-        }
-      ],
+      "expo-build-properties",
       [
         "react-native-vision-camera",
         {
