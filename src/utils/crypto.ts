@@ -29,7 +29,7 @@ async function getOrCreateKey(): Promise<string> {
     const existing = await SInfo.getItem(KEY_ALIAS, {
       sharedPreferencesName: KEY_SERVICE,
       keychainService:       KEY_SERVICE,
-    });
+    } as any);
     if (existing) return existing;
   } catch {
     // Key doesn't exist yet
@@ -43,9 +43,8 @@ async function getOrCreateKey(): Promise<string> {
   await SInfo.setItem(KEY_ALIAS, keyHex, {
     sharedPreferencesName: KEY_SERVICE,
     keychainService:       KEY_SERVICE,
-    // Android only: store in Keystore
     kSecAttrAccessible: 'kSecAttrAccessibleWhenUnlockedThisDeviceOnly',
-  });
+  } as any);
 
   return keyHex;
 }
@@ -112,5 +111,5 @@ export async function deleteKey(): Promise<void> {
   await SInfo.deleteItem(KEY_ALIAS, {
     sharedPreferencesName: KEY_SERVICE,
     keychainService:       KEY_SERVICE,
-  });
+  } as any);
 }
