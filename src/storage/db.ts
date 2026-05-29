@@ -19,19 +19,14 @@ export interface AttendanceRecord {
   synced:    boolean;
 }
 
-// btoa / atob are available in Hermes; Buffer is NOT.
-function float32ToB64(arr: Float32Array): string {
-  const bytes = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
-  let bin = '';
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  return btoa(bin);
+// Neither Buffer nor btoa/atob are available in Hermes.
+// Store as JSON array — simple, reliable, no encoding deps.
+function float32ToJson(arr: Float32Array): string {
+  return JSON.stringify(Array.from(arr));
 }
 
-function b64ToFloat32(b64: string): Float32Array {
-  const bin   = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new Float32Array(bytes.buffer);
+function jsonToFloat32(json: string): Float32Array {
+  return new Float32Array(JSON.parse(json) as number[]);
 }
 
 class BiometricDatabase {
@@ -76,7 +71,7 @@ class BiometricDatabase {
 
   async enrollUser(id: string, name: string, embedding: Float32Array): Promise<void> {
     const db  = await this.ready();
-    const b64 = float32ToB64(embedding);
+    const b64 = float32ToJson(embedding);
     await db.transaction(tx => {
       tx.executeSql(
         `INSERT OR REPLACE INTO users (id, name, embedding, enrolled_at) VALUES (?,?,?,?)`,
@@ -91,7 +86,7 @@ class BiometricDatabase {
       `SELECT embedding FROM users WHERE id = ?`, [userId],
     );
     if (result.rows.length === 0) return null;
-    return b64ToFloat32(result.rows.item(0).embedding as string);
+    return jsonToFloat32(result.rows.item(0).embedding as string);
   }
 
   async userExists(id: string): Promise<boolean> {
