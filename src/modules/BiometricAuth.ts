@@ -41,6 +41,7 @@ export class BiometricAuth {
   private listeners: AuthListener[] = [];
 
   async initialize() {
+    await db.open();
     await this.recognizer.initialize();
     this.emit({ phase: 'IDLE', message: 'Ready' });
   }

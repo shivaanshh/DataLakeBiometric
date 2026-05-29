@@ -11,9 +11,23 @@
  */
 
 import SQLite from 'react-native-sqlite-storage';
-import { encryptData, decryptData } from '../utils/crypto';
 
 SQLite.enablePromise(true);
+
+// btoa/atob are available in Hermes; Buffer is not.
+function float32ToBase64(arr: Float32Array): string {
+  const bytes = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
+  let binary = '';
+  bytes.forEach(b => { binary += String.fromCharCode(b); });
+  return btoa(binary);
+}
+
+function base64ToFloat32(b64: string): Float32Array {
+  const binary = atob(b64);
+  const bytes  = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Float32Array(bytes.buffer);
+}
 
 const DB_NAME    = 'datalake_biometric_v1.db';
 const DB_VERSION = '1.0';
@@ -22,7 +36,7 @@ export interface EnrolledUser {
   id:            string;
   name:          string;
   enrolledAt:    number;
-  embeddingEnc:  string; // AES-256 encrypted base64 of Float32Array buffer
+  embeddingEnc:  string; // base64-encoded Float32Array buffer
 }
 
 export interface AttendanceRecord {
@@ -86,14 +100,11 @@ class BiometricDatabase {
   // ─── USER ENROLLMENT ───────────────────────────────────────────────────
 
   async enrollUser(id: string, name: string, embedding: Float32Array): Promise<void> {
-    // Convert Float32Array to base64 string for storage
-    const raw          = Buffer.from(embedding.buffer).toString('base64');
-    const embeddingEnc = await encryptData(raw);
-
+    const embeddingB64 = float32ToBase64(embedding);
     await this.connection.transaction(tx => {
       tx.executeSql(
         `INSERT OR REPLACE INTO users (id, name, embedding_enc, enrolled_at) VALUES (?, ?, ?, ?)`,
-        [id, name, embeddingEnc, Date.now()]
+        [id, name, embeddingB64, Date.now()]
       );
     });
   }
@@ -103,18 +114,9 @@ class BiometricDatabase {
       `SELECT embedding_enc FROM users WHERE id = ?`,
       [userId]
     );
-
     if (result.rows.length === 0) return null;
-
-    const encData = result.rows.item(0).embedding_enc as string;
-    const raw     = await decryptData(encData);
-    const buf     = Buffer.from(raw, 'base64');
-
-    return new Float32Array(
-      buf.buffer,
-      buf.byteOffset,
-      buf.byteLength / Float32Array.BYTES_PER_ELEMENT
-    );
+    const b64 = result.rows.item(0).embedding_enc as string;
+    return base64ToFloat32(b64);
   }
 
   async getUserById(id: string): Promise<EnrolledUser | null> {
