@@ -4,7 +4,7 @@ import {
   ActivityIndicator, Alert, Platform,
 } from 'react-native';
 import {
-  Camera, useCameraDevice, useCameraPermission,
+  Camera, useCameraDevices, useCameraPermission,
 } from 'react-native-vision-camera';
 import { biometricAuth, AuthPhase, AuthEvent } from '../modules/BiometricAuth';
 import { syncManager, SyncResult }             from '../storage/syncManager';
@@ -36,7 +36,8 @@ const CHALLENGE_LABEL: Record<string, string> = {
 
 export default function AuthScreen({ userId, onSuccess, onFailed }: Props) {
   const { hasPermission, requestPermission } = useCameraPermission();
-  const device = useCameraDevice('front');
+  const devices = useCameraDevices();
+  const device  = devices.find(d => d.position === 'front') ?? devices[0];
 
   const [phase,   setPhase]   = useState<AuthPhase>('IDLE');
   const [message, setMessage] = useState('Initializing...');
@@ -107,7 +108,9 @@ export default function AuthScreen({ userId, onSuccess, onFailed }: Props) {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" color="#3B82F6" />
-        <Text style={styles.gray}>Loading camera...</Text>
+        <Text style={styles.gray}>
+          {devices.length === 0 ? 'No camera found — reopen app' : 'Loading camera...'}
+        </Text>
       </View>
     );
   }

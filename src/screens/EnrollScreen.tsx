@@ -4,7 +4,7 @@ import {
   StyleSheet, ActivityIndicator, Alert, Platform,
 } from 'react-native';
 import {
-  Camera, useCameraDevice, useCameraPermission,
+  Camera, useCameraDevices, useCameraPermission,
 } from 'react-native-vision-camera';
 import { biometricAuth } from '../modules/BiometricAuth';
 
@@ -23,7 +23,8 @@ const FRAMES_NEEDED = 5;
 
 export default function EnrollScreen({ onEnrolled }: Props) {
   const { hasPermission, requestPermission } = useCameraPermission();
-  const device = useCameraDevice('front');
+  const devices = useCameraDevices();
+  const device  = devices.find(d => d.position === 'front') ?? devices[0];
 
   const [step,     setStep]    = useState<'form' | 'capture' | 'processing' | 'done'>('form');
   const [userId,   setUserId]  = useState('');
@@ -54,6 +55,11 @@ export default function EnrollScreen({ onEnrolled }: Props) {
       <View style={styles.center}>
         <ActivityIndicator size="large" color="#3B82F6" />
         <Text style={styles.loadingText}>Loading camera...</Text>
+        <Text style={styles.hint}>
+          {devices.length === 0
+            ? 'No cameras found. Try reopening the app.'
+            : `Found ${devices.length} camera(s), selecting...`}
+        </Text>
       </View>
     );
   }
