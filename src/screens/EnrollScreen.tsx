@@ -4,8 +4,9 @@ import {
   StyleSheet, ActivityIndicator, Alert, Platform,
 } from 'react-native';
 import {
-  Camera, useCameraDevice, useCameraPermission,
+  Camera, useCameraPermission,
 } from 'react-native-vision-camera';
+import { useCamera } from '../plugins/useCamera';
 import { biometricAuth } from '../modules/BiometricAuth';
 
 interface Props {
@@ -23,7 +24,7 @@ const FRAMES_NEEDED = 5;
 
 export default function EnrollScreen({ onEnrolled }: Props) {
   const { hasPermission, requestPermission } = useCameraPermission();
-  const device = useCameraDevice('front');
+  const { device } = useCamera();
 
   const [step,     setStep]    = useState<'form' | 'capture' | 'processing' | 'done'>('form');
   const [userId,   setUserId]  = useState('');

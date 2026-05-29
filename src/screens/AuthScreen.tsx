@@ -4,8 +4,9 @@ import {
   ActivityIndicator, Alert, Platform,
 } from 'react-native';
 import {
-  Camera, useCameraDevice, useCameraPermission,
+  Camera, useCameraPermission,
 } from 'react-native-vision-camera';
+import { useCamera } from '../plugins/useCamera';
 import { biometricAuth, AuthPhase, AuthEvent } from '../modules/BiometricAuth';
 import { syncManager, SyncResult }             from '../storage/syncManager';
 import { useDetectAndMesh, DetectResult }       from '../plugins/useDetectAndMesh';
@@ -36,7 +37,7 @@ const CHALLENGE_LABEL: Record<string, string> = {
 
 export default function AuthScreen({ userId, onSuccess, onFailed }: Props) {
   const { hasPermission, requestPermission } = useCameraPermission();
-  const device = useCameraDevice('front');
+  const { device } = useCamera();
 
   const [phase,   setPhase]   = useState<AuthPhase>('IDLE');
   const [message, setMessage] = useState('Initializing...');
