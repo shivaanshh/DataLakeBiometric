@@ -1,60 +1,41 @@
-/**
- * AuthScreen.tsx
- *
- * Authentication screen with:
- *   - Live camera feed (react-native-vision-camera)
- *   - Face oval guide overlay
- *   - Liveness challenge prompts
- *   - Auth result display
- *   - Sync status indicator
- *
- * TODO for Claude Code:
- *   - Implement detectAndMesh() as a VisionCamera frame processor plugin (native)
- *   - Add GPS permission + location fetch before logAttendance()
- *   - Test on physical device (emulator camera won't work for real faces)
- */
-
 import React, { useState, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  ActivityIndicator, Alert, Platform
+  ActivityIndicator, Alert, Platform,
 } from 'react-native';
 import {
-  Camera,
-  useCameraDevice,
+  Camera, useCameraDevice, useCameraPermission,
 } from 'react-native-vision-camera';
 import { biometricAuth, AuthPhase, AuthEvent } from '../modules/BiometricAuth';
 import { syncManager, SyncResult }             from '../storage/syncManager';
-import { useDetectAndMesh, DetectAndMeshResult } from '../plugins/useDetectAndMesh';
+import { useDetectAndMesh, DetectResult }       from '../plugins/useDetectAndMesh';
 
-// ─── Challenge prompt text ──────────────────────────────────────────────────
-const CHALLENGE_PROMPT: Record<string, string> = {
-  BLINK:       '👁  Blink your eyes',
-  SMILE:       '😊  Give us a smile',
-  TURN_LEFT:   '←  Turn your head left',
-  TURN_RIGHT:  '→  Turn your head right',
-};
-
-const PHASE_COLORS: Record<AuthPhase, string> = {
-  IDLE:          '#6B7280',
-  DETECTING_FACE:'#3B82F6',
-  LIVENESS:      '#F59E0B',
-  RECOGNIZING:   '#8B5CF6',
-  SUCCESS:       '#10B981',
-  FAILED:        '#EF4444',
-  ENROLLING:     '#3B82F6',
-  ENROLLED:      '#10B981',
-};
-
-// ─── Props ─────────────────────────────────────────────────────────────────
-interface AuthScreenProps {
-  userId:   string;
+interface Props {
+  userId:    string;
   onSuccess?: () => void;
   onFailed?:  () => void;
 }
 
-// ─── Component ─────────────────────────────────────────────────────────────
-export default function AuthScreen({ userId, onSuccess, onFailed }: AuthScreenProps) {
+const PHASE_COLOR: Record<AuthPhase, string> = {
+  IDLE:           '#6B7280',
+  DETECTING_FACE: '#3B82F6',
+  LIVENESS:       '#F59E0B',
+  RECOGNIZING:    '#8B5CF6',
+  SUCCESS:        '#10B981',
+  FAILED:         '#EF4444',
+  ENROLLING:      '#3B82F6',
+  ENROLLED:       '#10B981',
+};
+
+const CHALLENGE_LABEL: Record<string, string> = {
+  BLINK:      '👁  Please blink',
+  SMILE:      '😊  Please smile',
+  TURN_LEFT:  '←  Turn head left',
+  TURN_RIGHT: '→  Turn head right',
+};
+
+export default function AuthScreen({ userId, onSuccess, onFailed }: Props) {
+  const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('front');
 
   const [phase,   setPhase]   = useState<AuthPhase>('IDLE');
@@ -63,102 +44,75 @@ export default function AuthScreen({ userId, onSuccess, onFailed }: AuthScreenPr
   const [pending, setPending] = useState(0);
   const [syncing, setSyncing] = useState(false);
 
-  const isActive = !['SUCCESS', 'FAILED', 'IDLE'].includes(phase);
+  const isActive = !['SUCCESS', 'FAILED'].includes(phase);
 
-  // ─── Auth event handler ───────────────────────────────────────────────
-  const handleAuthEvent = useCallback((event: AuthEvent) => {
-    setPhase(event.phase);
-    setMessage(
-      event.challenge
-        ? CHALLENGE_PROMPT[event.challenge] ?? event.message
-        : event.message
-    );
-    if (event.similarity !== undefined) setSim(event.similarity);
-    if (event.phase === 'SUCCESS') onSuccess?.();
-    if (event.phase === 'FAILED')  onFailed?.();
+  // ── Event handler ──────────────────────────────────────────────────────
+  const handleEvent = useCallback((e: AuthEvent) => {
+    setPhase(e.phase);
+    setMessage(e.challenge ? (CHALLENGE_LABEL[e.challenge] ?? e.message) : e.message);
+    if (e.similarity !== undefined) setSim(e.similarity);
+    if (e.phase === 'SUCCESS') onSuccess?.();
+    if (e.phase === 'FAILED')  onFailed?.();
   }, [onSuccess, onFailed]);
 
-  const handleSyncComplete = useCallback(async (result: SyncResult) => {
-    setSyncing(false);
-    const count = await syncManager.getPendingCount();
-    setPending(count);
-    if (result.synced > 0) {
-      Alert.alert('Sync complete', `${result.synced} records uploaded, ${result.purged} purged locally.`);
-    }
-  }, []);
+  // ── Frame result handler (called from worklet via useRunOnJS) ──────────
+  const handleDetect = useCallback((r: DetectResult | null) => {
+    biometricAuth.processAuthFrame({
+      userId,
+      landmarks:  r?.landmarks  ?? null,
+      faceRGBA:   r?.faceRGBA   ?? null,
+      faceWidth:  r?.faceWidth  ?? 0,
+      faceHeight: r?.faceHeight ?? 0,
+    });
+  }, [userId]);
 
-  // ─── Frame processor (BlazeFace + FaceMesh, runs entirely in worklet) ───
-  // Must be declared before the useEffects that reference modelsLoading.
-  const handleDetectResult = useCallback(
-    (result: DetectAndMeshResult | null) => {
-      biometricAuth.processAuthFrame({
-        userId,
-        landmarks:   result?.landmarks  ?? null,
-        faceRGBA:    result?.faceRGBA   ?? null,
-        faceWidth:   result?.faceWidth  ?? 0,
-        faceHeight:  result?.faceHeight ?? 0,
-      });
-    },
-    [userId]
-  );
+  // useDetectAndMesh MUST be called before any conditional returns that
+  // depend on its output, to avoid violating Rules of Hooks.
+  const { frameProcessor, isLoading } = useDetectAndMesh(handleDetect);
 
-  const { frameProcessor, isLoading: modelsLoading } =
-    useDetectAndMesh(handleDetectResult);
-
-  // ─── Init ─────────────────────────────────────────────────────────────
+  // ── Init ───────────────────────────────────────────────────────────────
   useEffect(() => {
-    const initSystem = async () => {
-      await biometricAuth.initialize();
-      const off = biometricAuth.on(handleAuthEvent);
-      syncManager.startListening(handleSyncComplete);
-      const count = await syncManager.getPendingCount();
-      setPending(count);
-      if (!modelsLoading) setMessage('Position your face in the oval');
-      return off;
-    };
-
-    let cleanup: (() => void) | undefined;
-    initSystem().then(off => { cleanup = off; });
-
+    const off = biometricAuth.on(handleEvent);
+    syncManager.startListening(async (result: SyncResult) => {
+      setSyncing(false);
+      setPending(await syncManager.getPendingCount());
+      if (result.synced > 0) Alert.alert('Sync complete', `${result.synced} records uploaded.`);
+    });
+    syncManager.getPendingCount().then(setPending);
     return () => {
-      cleanup?.();
+      off();
       syncManager.stopListening();
     };
-  }, []);
+  }, [handleEvent]);
 
   useEffect(() => {
-    if (modelsLoading) setMessage('Loading AI models...');
-    else if (phase === 'IDLE') setMessage('Position your face in the oval');
-  }, [modelsLoading, phase]);
+    if (isLoading) setMessage('Loading AI models...');
+    else           setMessage('Position your face in the oval');
+  }, [isLoading]);
 
-  // ─── Manual sync button ───────────────────────────────────────────────
-  const handleManualSync = async () => {
-    setSyncing(true);
-    const result = await syncManager.forceSyncNow();
-    if (!result.success) {
-      setSyncing(false);
-      Alert.alert('Sync failed', result.error ?? 'Unknown error');
-    }
-  };
-
-  const handleRetry = () => {
-    biometricAuth.reset();
-    setPhase('DETECTING_FACE');
-    setSim(null);
-    setMessage('Position your face in the oval');
-  };
-
-  // ─── Render ───────────────────────────────────────────────────────────
-  if (!device) {
+  // ── Permission gate ────────────────────────────────────────────────────
+  if (!hasPermission) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" color="#3B82F6" />
-        <Text style={styles.loadingText}>Loading camera...</Text>
+        <Text style={styles.permTitle}>Camera Access Needed</Text>
+        <Text style={styles.permSub}>Camera permission is required for face authentication.</Text>
+        <TouchableOpacity style={styles.actionBtn} onPress={requestPermission}>
+          <Text style={styles.actionText}>Grant Permission</Text>
+        </TouchableOpacity>
       </View>
     );
   }
 
-  const statusColor = PHASE_COLORS[phase];
+  if (!device) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color="#3B82F6" />
+        <Text style={styles.gray}>Loading camera...</Text>
+      </View>
+    );
+  }
+
+  const color = PHASE_COLOR[phase];
 
   return (
     <View style={styles.container}>
@@ -167,47 +121,51 @@ export default function AuthScreen({ userId, onSuccess, onFailed }: AuthScreenPr
         style={StyleSheet.absoluteFill}
         device={device}
         isActive={isActive}
-        frameProcessor={isActive ? frameProcessor : undefined}
+        frameProcessor={isActive && !isLoading ? frameProcessor : undefined}
         fps={15}
         pixelFormat="rgb"
       />
 
-      {/* Overlay */}
       <View style={styles.overlay}>
         {/* Top bar */}
         <View style={styles.topBar}>
           <Text style={styles.appName}>DataLake Biometric</Text>
-          <TouchableOpacity onPress={handleManualSync} disabled={syncing}>
-            <View style={[styles.syncBadge, pending > 0 ? styles.syncPending : styles.syncClear]}>
+          <TouchableOpacity
+            onPress={async () => { setSyncing(true); await syncManager.forceSyncNow(); }}
+            disabled={syncing}
+          >
+            <View style={[styles.syncBadge, pending > 0 ? styles.syncPending : styles.syncOk]}>
               {syncing
                 ? <ActivityIndicator size="small" color="#fff" />
-                : <Text style={styles.syncText}>
-                    {pending > 0 ? `⬆ ${pending} pending` : '✓ Synced'}
-                  </Text>
+                : <Text style={styles.syncText}>{pending > 0 ? `⬆ ${pending}` : '✓ Synced'}</Text>
               }
             </View>
           </TouchableOpacity>
         </View>
 
-        {/* Face oval guide */}
-        <View style={styles.ovalContainer}>
-          <View style={[styles.oval, { borderColor: statusColor }]} />
+        {/* Oval guide */}
+        <View style={styles.ovalWrap}>
+          <View style={[styles.oval, { borderColor: color }]} />
         </View>
 
         {/* Status card */}
-        <View style={styles.statusCard}>
-          <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
+        <View style={styles.card}>
+          <View style={[styles.dot, { backgroundColor: color }]} />
           <Text style={styles.statusText}>{message}</Text>
-
           {sim !== null && (
-            <Text style={styles.simScore}>
-              Confidence: {(sim * 100).toFixed(1)}%
-            </Text>
+            <Text style={styles.simText}>Confidence: {(sim * 100).toFixed(1)}%</Text>
           )}
-
           {(phase === 'SUCCESS' || phase === 'FAILED') && (
-            <TouchableOpacity style={styles.retryButton} onPress={handleRetry}>
-              <Text style={styles.retryText}>
+            <TouchableOpacity
+              style={[styles.actionBtn, { marginTop: 4 }]}
+              onPress={() => {
+                biometricAuth.reset();
+                setPhase('DETECTING_FACE');
+                setSim(null);
+                setMessage('Position your face in the oval');
+              }}
+            >
+              <Text style={styles.actionText}>
                 {phase === 'SUCCESS' ? 'Authenticate Again' : 'Retry'}
               </Text>
             </TouchableOpacity>
@@ -218,59 +176,39 @@ export default function AuthScreen({ userId, onSuccess, onFailed }: AuthScreenPr
   );
 }
 
-// ─── Styles ────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   container:   { flex: 1, backgroundColor: '#000' },
-  center:      { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#111' },
-  loadingText: { color: '#fff', marginTop: 12, fontSize: 14 },
+  center:      { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0F172A', padding: 24, gap: 16 },
+  permTitle:   { color: '#F8FAFC', fontSize: 20, fontWeight: '700', textAlign: 'center' },
+  permSub:     { color: '#94A3B8', fontSize: 14, textAlign: 'center', lineHeight: 22 },
+  gray:        { color: '#94A3B8', marginTop: 12 },
   overlay:     { flex: 1, justifyContent: 'space-between' },
   topBar: {
-    flexDirection:  'row',
-    justifyContent: 'space-between',
-    alignItems:     'center',
-    padding:        16,
-    paddingTop:     Platform.OS === 'ios' ? 56 : 16,
-    backgroundColor:'rgba(0,0,0,0.4)',
+    flexDirection:   'row',
+    justifyContent:  'space-between',
+    alignItems:      'center',
+    padding:          16,
+    paddingTop:       Platform.OS === 'ios' ? 56 : 16,
+    backgroundColor: 'rgba(0,0,0,0.5)',
   },
-  appName:    { color: '#fff', fontSize: 17, fontWeight: '600' },
-  syncBadge:  { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16 },
-  syncPending:{ backgroundColor: '#F59E0B' },
-  syncClear:  { backgroundColor: '#10B981' },
-  syncText:   { color: '#fff', fontSize: 12, fontWeight: '600' },
-  ovalContainer: {
-    flex:           1,
-    justifyContent: 'center',
-    alignItems:     'center',
-  },
-  oval: {
-    width:        240,
-    height:       300,
-    borderRadius: 120,
-    borderWidth:  3,
-    borderColor:  '#3B82F6',
-  },
-  statusCard: {
-    backgroundColor: 'rgba(0,0,0,0.7)',
+  appName:     { color: '#F8FAFC', fontSize: 17, fontWeight: '600' },
+  syncBadge:   { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16 },
+  syncPending: { backgroundColor: '#F59E0B' },
+  syncOk:      { backgroundColor: '#10B981' },
+  syncText:    { color: '#fff', fontSize: 12, fontWeight: '600' },
+  ovalWrap:    { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  oval:        { width: 220, height: 280, borderRadius: 110, borderWidth: 3 },
+  card: {
+    backgroundColor: 'rgba(15,23,42,0.85)',
     margin:           16,
     padding:          20,
     borderRadius:     16,
     alignItems:       'center',
     gap:              8,
   },
-  statusDot: {
-    width:        10,
-    height:       10,
-    borderRadius: 5,
-    marginBottom: 4,
-  },
-  statusText: { color: '#fff', fontSize: 16, textAlign: 'center', fontWeight: '500' },
-  simScore:   { color: '#9CA3AF', fontSize: 13 },
-  retryButton:{
-    marginTop:    8,
-    backgroundColor:'#3B82F6',
-    paddingHorizontal: 24,
-    paddingVertical:    10,
-    borderRadius:       10,
-  },
-  retryText: { color: '#fff', fontWeight: '600', fontSize: 14 },
+  dot:         { width: 10, height: 10, borderRadius: 5, marginBottom: 2 },
+  statusText:  { color: '#F8FAFC', fontSize: 16, fontWeight: '500', textAlign: 'center' },
+  simText:     { color: '#94A3B8', fontSize: 13 },
+  actionBtn:   { backgroundColor: '#3B82F6', borderRadius: 10, paddingHorizontal: 24, paddingVertical: 10 },
+  actionText:  { color: '#fff', fontWeight: '600', fontSize: 14 },
 });

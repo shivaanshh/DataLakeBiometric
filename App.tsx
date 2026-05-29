@@ -1,50 +1,19 @@
-/**
- * App.tsx — root component for DataLake Biometric
- *
- * Simple two-screen flow:
- *   Enroll screen  → lets a user register their face
- *   Auth screen    → authenticates via BlazeFace + FaceMesh + MobileFaceNet
- *
- * For the hackathon demo, the active userId is hardcoded so you can test
- * immediately on a physical device without a login system.
- * Replace with your actual user management / Datalake 3.0 session token.
- */
-
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet, SafeAreaView, Alert,
+  View, Text, TouchableOpacity, StyleSheet, SafeAreaView, StatusBar,
 } from 'react-native';
-import { Camera } from 'react-native-vision-camera';
 import AuthScreen   from './src/screens/AuthScreen';
 import EnrollScreen from './src/screens/EnrollScreen';
 
 type Screen = 'home' | 'enroll' | 'auth';
 
-// Replace with the real signed-in user ID from Datalake 3.0 session
-const DEMO_USER_ID   = 'demo_user_001';
-const DEMO_USER_NAME = 'Demo User';
+const DEMO_USER_ID = 'demo_user_001';
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('home');
 
-  useEffect(() => {
-    (async () => {
-      const status = await Camera.requestCameraPermission();
-      if (status === 'denied') {
-        Alert.alert(
-          'Camera Permission Required',
-          'Please enable camera access in Settings to use face authentication.',
-        );
-      }
-    })();
-  }, []);
-
   if (screen === 'enroll') {
-    return (
-      <EnrollScreen
-        onEnrolled={() => setScreen('home')}
-      />
-    );
+    return <EnrollScreen onEnrolled={() => setScreen('home')} />;
   }
 
   if (screen === 'auth') {
@@ -52,86 +21,76 @@ export default function App() {
       <AuthScreen
         userId={DEMO_USER_ID}
         onSuccess={() => setScreen('home')}
-        onFailed={()  => setScreen('home')}
+        onFailed={() => setScreen('home')}
       />
     );
   }
 
   return (
     <SafeAreaView style={styles.container}>
-      <Text style={styles.title}>DataLake Biometric</Text>
-      <Text style={styles.subtitle}>Offline Face Authentication</Text>
+      <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
+
+      <View style={styles.header}>
+        <Text style={styles.logo}>🔐</Text>
+        <Text style={styles.title}>DataLake Biometric</Text>
+        <Text style={styles.subtitle}>Offline Face Authentication</Text>
+      </View>
 
       <View style={styles.buttons}>
         <TouchableOpacity
-          style={[styles.btn, styles.btnPrimary]}
+          style={[styles.btn, styles.primary]}
           onPress={() => setScreen('auth')}
+          activeOpacity={0.85}
         >
-          <Text style={styles.btnText}>Authenticate</Text>
+          <Text style={styles.primaryText}>Authenticate</Text>
+          <Text style={styles.btnSub}>Verify your identity</Text>
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.btn, styles.btnSecondary]}
+          style={[styles.btn, styles.secondary]}
           onPress={() => setScreen('enroll')}
+          activeOpacity={0.85}
         >
-          <Text style={styles.btnTextSecondary}>Enroll Face</Text>
+          <Text style={styles.secondaryText}>Enroll Face</Text>
+          <Text style={[styles.btnSub, { color: '#60A5FA' }]}>Register a new user</Text>
         </TouchableOpacity>
       </View>
 
-      <Text style={styles.note}>User: {DEMO_USER_ID}</Text>
+      <Text style={styles.footer}>User: {DEMO_USER_ID} · Offline Mode</Text>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
+    flex:            1,
     backgroundColor: '#0F172A',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 16,
+    justifyContent:  'center',
+    alignItems:      'center',
+    padding:          24,
+    gap:              24,
   },
+  header: { alignItems: 'center', gap: 8 },
+  logo:   { fontSize: 56, marginBottom: 4 },
   title: {
-    fontSize: 28,
-    fontWeight: '700',
-    color: '#F8FAFC',
-    letterSpacing: 0.5,
+    fontSize:    28,
+    fontWeight:  '700',
+    color:       '#F8FAFC',
+    letterSpacing: 0.3,
   },
-  subtitle: {
-    fontSize: 15,
-    color: '#94A3B8',
-    marginBottom: 24,
-  },
-  buttons: {
-    width: '80%',
-    gap: 12,
-  },
+  subtitle: { fontSize: 15, color: '#94A3B8' },
+  buttons: { width: '100%', gap: 14 },
   btn: {
-    paddingVertical: 16,
-    borderRadius: 14,
-    alignItems: 'center',
+    borderRadius:   14,
+    paddingVertical: 18,
+    paddingHorizontal: 24,
+    alignItems:     'center',
+    gap:             4,
   },
-  btnPrimary: {
-    backgroundColor: '#3B82F6',
-  },
-  btnSecondary: {
-    backgroundColor: 'transparent',
-    borderWidth: 1.5,
-    borderColor: '#3B82F6',
-  },
-  btnText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  btnTextSecondary: {
-    color: '#3B82F6',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  note: {
-    fontSize: 12,
-    color: '#475569',
-    marginTop: 8,
-  },
+  primary:      { backgroundColor: '#3B82F6' },
+  secondary:    { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: '#3B82F6' },
+  primaryText:  { color: '#fff',     fontSize: 17, fontWeight: '700' },
+  secondaryText:{ color: '#60A5FA',  fontSize: 17, fontWeight: '700' },
+  btnSub:       { color: 'rgba(255,255,255,0.6)', fontSize: 12 },
+  footer:       { color: '#475569', fontSize: 12, position: 'absolute', bottom: 24 },
 });
