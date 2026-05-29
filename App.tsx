@@ -10,10 +10,11 @@
  * Replace with your actual user management / Datalake 3.0 session token.
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet, SafeAreaView,
+  View, Text, TouchableOpacity, StyleSheet, SafeAreaView, Alert,
 } from 'react-native';
+import { Camera } from 'react-native-vision-camera';
 import AuthScreen   from './src/screens/AuthScreen';
 import EnrollScreen from './src/screens/EnrollScreen';
 
@@ -25,6 +26,18 @@ const DEMO_USER_NAME = 'Demo User';
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('home');
+
+  useEffect(() => {
+    (async () => {
+      const status = await Camera.requestCameraPermission();
+      if (status === 'denied') {
+        Alert.alert(
+          'Camera Permission Required',
+          'Please enable camera access in Settings to use face authentication.',
+        );
+      }
+    })();
+  }, []);
 
   if (screen === 'enroll') {
     return (
