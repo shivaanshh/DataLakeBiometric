@@ -24,7 +24,7 @@ const FRAMES_NEEDED = 5;
 
 export default function EnrollScreen({ onEnrolled }: Props) {
   const { hasPermission, requestPermission } = useCameraPermission();
-  const { device } = useCamera();
+  const device = useCamera(hasPermission);
 
   const [step,     setStep]    = useState<'form' | 'capture' | 'processing' | 'done'>('form');
   const [userId,   setUserId]  = useState('');

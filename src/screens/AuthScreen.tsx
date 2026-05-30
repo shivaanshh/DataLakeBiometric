@@ -37,7 +37,7 @@ const CHALLENGE_LABEL: Record<string, string> = {
 
 export default function AuthScreen({ userId, onSuccess, onFailed }: Props) {
   const { hasPermission, requestPermission } = useCameraPermission();
-  const { device } = useCamera();
+  const device = useCamera(hasPermission);
 
   const [phase,   setPhase]   = useState<AuthPhase>('IDLE');
   const [message, setMessage] = useState('Initializing...');

@@ -4,48 +4,47 @@ import { Camera } from 'react-native-vision-camera';
 type CameraDevice = ReturnType<typeof Camera.getAvailableCameraDevices>[number];
 
 /**
- * Reliably picks the front camera (falls back to any camera).
- * Retries every 300 ms for up to 8 seconds because on Samsung/One-UI the
- * Camera2 device list is populated asynchronously after the component mounts.
+ * Picks the front camera (falls back to any camera).
+ * Only starts retrying AFTER permission is granted.
+ * Retries every 300 ms for up to 10 seconds.
  */
-export function useCamera(): { device: CameraDevice | null; ready: boolean } {
+export function useCamera(hasPermission: boolean): CameraDevice | null {
   const [device, setDevice] = useState<CameraDevice | null>(null);
 
   useEffect(() => {
+    if (!hasPermission) return; // wait until permission granted
+
     let mounted  = true;
     let attempts = 0;
-    const MAX    = 27; // 27 × 300 ms = ~8 s
+    const MAX    = 33; // 33 × 300 ms = ~10 s
 
-    function pick(list: CameraDevice[]): CameraDevice | null {
+    function pick(): CameraDevice | null {
+      const list = Camera.getAvailableCameraDevices();
       return list.find(d => d.position === 'front') ?? list[0] ?? null;
     }
 
     function tryNow() {
       if (!mounted) return;
-      const list   = Camera.getAvailableCameraDevices();
-      const chosen = pick(list);
-      if (chosen) {
-        setDevice(chosen);
-        return;
-      }
+      const chosen = pick();
+      if (chosen) { setDevice(chosen); return; }
       attempts++;
       if (attempts < MAX) setTimeout(tryNow, 300);
     }
 
-    // Subscribe to changes (fires when native init completes)
-    const sub = Camera.addCameraDevicesChangedListener(list => {
+    // Also subscribe to native change events
+    const sub = Camera.addCameraDevicesChangedListener(newList => {
       if (!mounted) return;
-      const chosen = pick(list as CameraDevice[]);
+      const chosen =
+        (newList as CameraDevice[]).find(d => d.position === 'front') ??
+        (newList as CameraDevice[])[0] ??
+        null;
       if (chosen) setDevice(chosen);
     });
 
     tryNow();
 
-    return () => {
-      mounted = false;
-      sub.remove();
-    };
-  }, []);
+    return () => { mounted = false; sub.remove(); };
+  }, [hasPermission]); // restart when permission changes false→true
 
-  return { device, ready: device !== null };
+  return device;
 }
