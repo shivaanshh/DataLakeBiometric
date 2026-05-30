@@ -2,15 +2,6 @@ import SQLite from 'react-native-sqlite-storage';
 
 SQLite.enablePromise(true);
 
-const DB_NAME = 'biometric_v2.db';
-
-export interface EnrolledUser {
-  id:          string;
-  name:        string;
-  enrolledAt:  number;
-  embedding:   string; // base64 Float32Array
-}
-
 export interface AttendanceRecord {
   id:        string;
   userId:    string;
@@ -19,152 +10,120 @@ export interface AttendanceRecord {
   synced:    boolean;
 }
 
-// Neither Buffer nor btoa/atob are available in Hermes.
-// Store as JSON array — simple, reliable, no encoding deps.
-function float32ToJson(arr: Float32Array): string {
-  return JSON.stringify(Array.from(arr));
+// Hermes has no Buffer or btoa — use JSON array for Float32Array
+function encodeEmbedding(v: Float32Array): string {
+  return JSON.stringify(Array.from(v));
+}
+function decodeEmbedding(s: string): Float32Array {
+  return new Float32Array(JSON.parse(s) as number[]);
 }
 
-function jsonToFloat32(json: string): Float32Array {
-  return new Float32Array(JSON.parse(json) as number[]);
-}
+class Database {
+  private _db: SQLite.SQLiteDatabase | null = null;
+  private _init: Promise<void> | null = null;
 
-class BiometricDatabase {
-  private db:          SQLite.SQLiteDatabase | null = null;
-  private initPromise: Promise<void>         | null = null;
-
-  // Auto-opens on first call — no explicit open() needed.
-  private async ready(): Promise<SQLite.SQLiteDatabase> {
-    if (this.db) return this.db;
-    if (!this.initPromise) this.initPromise = this.init();
-    await this.initPromise;
-    return this.db!;
+  private async open(): Promise<SQLite.SQLiteDatabase> {
+    if (this._db) return this._db;
+    if (!this._init) this._init = this._setup();
+    await this._init;
+    return this._db!;
   }
 
-  private async init(): Promise<void> {
-    this.db = await SQLite.openDatabase({ name: DB_NAME, location: 'default' });
-    await this.db.transaction(tx => {
-      tx.executeSql(`
-        CREATE TABLE IF NOT EXISTS users (
-          id          TEXT PRIMARY KEY,
-          name        TEXT NOT NULL,
-          embedding   TEXT NOT NULL,
-          enrolled_at INTEGER NOT NULL
-        )
-      `);
-      tx.executeSql(`
-        CREATE TABLE IF NOT EXISTS attendance (
-          id        TEXT PRIMARY KEY,
-          user_id   TEXT NOT NULL,
-          timestamp INTEGER NOT NULL,
-          location  TEXT DEFAULT '',
-          synced    INTEGER DEFAULT 0
-        )
-      `);
-      tx.executeSql(`
-        CREATE INDEX IF NOT EXISTS idx_att_synced ON attendance(synced, timestamp)
-      `);
+  private async _setup(): Promise<void> {
+    this._db = await SQLite.openDatabase({ name: 'biometric.db', location: 'default' });
+    await this._db.transaction(tx => {
+      tx.executeSql(`CREATE TABLE IF NOT EXISTS users (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        embedding   TEXT NOT NULL,
+        enrolled_at INTEGER NOT NULL
+      )`);
+      tx.executeSql(`CREATE TABLE IF NOT EXISTS attendance (
+        id        TEXT PRIMARY KEY,
+        user_id   TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        location  TEXT DEFAULT '',
+        synced    INTEGER DEFAULT 0
+      )`);
     });
   }
 
-  // ── Users ──────────────────────────────────────────────────────────────
-
   async enrollUser(id: string, name: string, embedding: Float32Array): Promise<void> {
-    const db  = await this.ready();
-    const b64 = float32ToJson(embedding);
+    const db = await this.open();
     await db.transaction(tx => {
       tx.executeSql(
         `INSERT OR REPLACE INTO users (id, name, embedding, enrolled_at) VALUES (?,?,?,?)`,
-        [id, name, b64, Date.now()],
+        [id, name, encodeEmbedding(embedding), Date.now()],
       );
     });
   }
 
   async getEmbedding(userId: string): Promise<Float32Array | null> {
-    const db       = await this.ready();
-    const [result] = await db.executeSql(
-      `SELECT embedding FROM users WHERE id = ?`, [userId],
-    );
-    if (result.rows.length === 0) return null;
-    return jsonToFloat32(result.rows.item(0).embedding as string);
+    const db = await this.open();
+    const [res] = await db.executeSql(`SELECT embedding FROM users WHERE id=?`, [userId]);
+    if (res.rows.length === 0) return null;
+    return decodeEmbedding(res.rows.item(0).embedding);
   }
 
   async userExists(id: string): Promise<boolean> {
-    const db       = await this.ready();
-    const [result] = await db.executeSql(
-      `SELECT 1 FROM users WHERE id = ? LIMIT 1`, [id],
-    );
-    return result.rows.length > 0;
+    const db = await this.open();
+    const [res] = await db.executeSql(`SELECT 1 FROM users WHERE id=? LIMIT 1`, [id]);
+    return res.rows.length > 0;
   }
 
   async getAllUsers(): Promise<Array<{ id: string; name: string }>> {
-    const db       = await this.ready();
-    const [result] = await db.executeSql(`SELECT id, name FROM users ORDER BY name`);
+    const db = await this.open();
+    const [res] = await db.executeSql(`SELECT id, name FROM users ORDER BY name`);
     const out: Array<{ id: string; name: string }> = [];
-    for (let i = 0; i < result.rows.length; i++) {
-      out.push({ id: result.rows.item(i).id, name: result.rows.item(i).name });
-    }
+    for (let i = 0; i < res.rows.length; i++) out.push(res.rows.item(i));
     return out;
   }
 
-  // ── Attendance ─────────────────────────────────────────────────────────
-
-  async logAttendance(record: Omit<AttendanceRecord, 'synced'>): Promise<void> {
-    const db = await this.ready();
+  async logAttendance(r: Omit<AttendanceRecord, 'synced'>): Promise<void> {
+    const db = await this.open();
     await db.transaction(tx => {
       tx.executeSql(
-        `INSERT INTO attendance (id, user_id, timestamp, location, synced) VALUES (?,?,?,?,0)`,
-        [record.id, record.userId, record.timestamp, record.location],
+        `INSERT INTO attendance (id,user_id,timestamp,location,synced) VALUES (?,?,?,?,0)`,
+        [r.id, r.userId, r.timestamp, r.location],
       );
     });
   }
 
   async getUnsynced(): Promise<AttendanceRecord[]> {
-    const db       = await this.ready();
-    const [result] = await db.executeSql(
-      `SELECT * FROM attendance WHERE synced = 0 ORDER BY timestamp ASC`,
+    const db = await this.open();
+    const [res] = await db.executeSql(
+      `SELECT * FROM attendance WHERE synced=0 ORDER BY timestamp`,
     );
     const out: AttendanceRecord[] = [];
-    for (let i = 0; i < result.rows.length; i++) {
-      const r = result.rows.item(i);
-      out.push({
-        id: r.id, userId: r.user_id, timestamp: r.timestamp,
-        location: r.location, synced: false,
-      });
+    for (let i = 0; i < res.rows.length; i++) {
+      const r = res.rows.item(i);
+      out.push({ id: r.id, userId: r.user_id, timestamp: r.timestamp, location: r.location, synced: false });
     }
     return out;
   }
 
   async getPendingCount(): Promise<number> {
-    const db       = await this.ready();
-    const [result] = await db.executeSql(
-      `SELECT COUNT(*) AS cnt FROM attendance WHERE synced = 0`,
-    );
-    return result.rows.item(0).cnt as number;
+    const db = await this.open();
+    const [res] = await db.executeSql(`SELECT COUNT(*) AS n FROM attendance WHERE synced=0`);
+    return res.rows.item(0).n as number;
   }
 
   async markSynced(ids: string[]): Promise<void> {
     if (!ids.length) return;
-    const db = await this.ready();
-    const placeholders = ids.map(() => '?').join(',');
+    const db = await this.open();
+    const ph = ids.map(() => '?').join(',');
     await db.transaction(tx => {
-      tx.executeSql(
-        `UPDATE attendance SET synced = 1 WHERE id IN (${placeholders})`, ids,
-      );
+      tx.executeSql(`UPDATE attendance SET synced=1 WHERE id IN (${ph})`, ids);
     });
   }
 
   async purgeSynced(): Promise<number> {
-    const db       = await this.ready();
-    const [r]      = await db.executeSql(
-      `SELECT COUNT(*) AS cnt FROM attendance WHERE synced = 1`,
-    );
-    const count = r.rows.item(0).cnt as number;
-    await db.transaction(tx => {
-      tx.executeSql(`DELETE FROM attendance WHERE synced = 1`);
-    });
-    return count;
+    const db = await this.open();
+    const [r] = await db.executeSql(`SELECT COUNT(*) AS n FROM attendance WHERE synced=1`);
+    const n = r.rows.item(0).n as number;
+    await db.transaction(tx => { tx.executeSql(`DELETE FROM attendance WHERE synced=1`); });
+    return n;
   }
 }
 
-export const db = new BiometricDatabase();
+export const db = new Database();

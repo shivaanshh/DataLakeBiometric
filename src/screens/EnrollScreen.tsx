@@ -1,291 +1,319 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity,
-  StyleSheet, ActivityIndicator, Alert, Platform,
+  View, Text, TextInput, TouchableOpacity, StyleSheet,
+  ActivityIndicator, Alert, Platform, ScrollView,
 } from 'react-native';
 import { Camera, useCameraPermission } from 'react-native-vision-camera';
 import { useCamera } from '../plugins/useCamera';
 import { useDetectAndMesh, DetectResult } from '../plugins/useDetectAndMesh';
 import { biometricAuth } from '../modules/BiometricAuth';
 
+// ── Constants ──────────────────────────────────────────────────────────────────
+const TOTAL_CAPTURES   = 5;
+const CAPTURE_DELAY_MS = 1800; // minimum ms between auto-captures
+
+const POSE_INSTRUCTIONS = [
+  'Look straight at the camera',
+  'Tilt your head slightly left',
+  'Tilt your head slightly right',
+  'Look upward slightly',
+  'Look straight at the camera again',
+];
+
+// ── Types ──────────────────────────────────────────────────────────────────────
+type Step = 'form' | 'capture' | 'processing' | 'done';
+
 interface Props {
   onEnrolled?: (userId: string, userName: string) => void;
   onBack?:     () => void;
 }
 
-const POSES = [
-  'Look straight at the camera',
-  'Tilt head slightly left',
-  'Tilt head slightly right',
-  'Look up slightly',
-  'Look straight again — almost done!',
-];
-const CAPTURE_NEEDED   = 5;
-const CAPTURE_INTERVAL = 1800; // ms between auto-captures
-
+// ── Component ──────────────────────────────────────────────────────────────────
 export default function EnrollScreen({ onEnrolled, onBack }: Props) {
+  // Camera hooks — must be called unconditionally
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCamera(hasPermission);
 
-  const [step,        setStep]        = useState<'form' | 'capture' | 'processing' | 'done'>('form');
-  const [userId,      setUserId]      = useState('');
-  const [userName,    setName]        = useState('');
-  const [captured,    setCaptured]    = useState(0);
-  const [faceOn,      setFaceOn]      = useState(false);
-  const [error,       setError]       = useState('');
-  const [camActive,   setCamActive]   = useState(false);
+  // UI state
+  const [step,      setStep]      = useState<Step>('form');
+  const [userId,    setUserId]    = useState('');
+  const [userName,  setUserName]  = useState('');
+  const [captured,  setCaptured]  = useState(0);
+  const [faceFound, setFaceFound] = useState(false);
+  const [error,     setError]     = useState('');
+  const [camReady,  setCamReady]  = useState(false);
 
+  // Refs for values accessed inside frame callbacks (avoids stale closures)
+  const stepRef       = useRef<Step>('form');
+  const captureRef    = useRef(0);
+  const lastCaptureTs = useRef(0);
   const embeddings    = useRef<Float32Array[]>([]);
-  const lastCapMs     = useRef(0);
-  const capCountRef   = useRef(0);
-  const stepRef       = useRef<typeof step>('form');
 
-  // Keep refs in sync so frame callbacks can read them without stale closures
   useEffect(() => { stepRef.current = step; }, [step]);
 
-  // Samsung black-preview fix: activate camera 400 ms after mount
+  // Samsung Galaxy fix: 400ms black-preview workaround
   useEffect(() => {
-    const t = setTimeout(() => setCamActive(true), 400);
+    const t = setTimeout(() => setCamReady(true), 400);
     return () => clearTimeout(t);
   }, []);
 
-  // ── Frame processor callback (called on JS thread via useRunOnJS) ─────────
-  const handleDetect = useCallback((r: DetectResult | null) => {
+  // ── Frame processor callback ───────────────────────────────────────────────
+  const onDetect = useCallback((r: DetectResult | null) => {
     if (stepRef.current !== 'capture') return;
 
-    setFaceOn(r !== null);
+    setFaceFound(r !== null);
     if (!r) return;
 
     const now = Date.now();
-    if (now - lastCapMs.current < CAPTURE_INTERVAL) return;
-    if (capCountRef.current >= CAPTURE_NEEDED) return;
+    if (now - lastCaptureTs.current < CAPTURE_DELAY_MS) return;
+    if (captureRef.current >= TOTAL_CAPTURES) return;
 
-    lastCapMs.current = now;
+    lastCaptureTs.current = now;
     embeddings.current.push(r.embedding);
-    capCountRef.current += 1;
-    const n = capCountRef.current;
+    captureRef.current += 1;
+
+    const n = captureRef.current;
     setCaptured(n);
 
-    if (n >= CAPTURE_NEEDED) {
+    if (n >= TOTAL_CAPTURES) {
       stepRef.current = 'processing';
       setStep('processing');
     }
   }, []);
 
-  const { frameProcessor, isLoading } = useDetectAndMesh(handleDetect);
+  const { frameProcessor, isLoading } = useDetectAndMesh(onDetect);
 
-  // ── Run enrollment when enough frames captured ────────────────────────────
+  // ── Trigger enrollment after captures complete ─────────────────────────────
   useEffect(() => {
     if (step !== 'processing') return;
 
-    const embs = embeddings.current.slice();
-    biometricAuth.enroll(userId.trim(), userName.trim(), embs)
+    biometricAuth
+      .enroll(userId.trim(), userName.trim(), embeddings.current.slice())
       .then(() => {
         setStep('done');
         setTimeout(() => onEnrolled?.(userId.trim(), userName.trim()), 1500);
       })
       .catch((e: any) => {
-        setError(e?.message ?? 'Enrollment failed');
+        setError(e?.message ?? 'Enrollment failed. Please try again.');
+        captureRef.current = 0;
+        embeddings.current = [];
+        setCaptured(0);
         setStep('form');
       });
   }, [step]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Handlers ──────────────────────────────────────────────────────────────
+  // ── Start capture ──────────────────────────────────────────────────────────
   const startCapture = () => {
-    if (!userId.trim())   { Alert.alert('Required', 'Please enter your Employee ID'); return; }
-    if (!userName.trim()) { Alert.alert('Required', 'Please enter your name'); return; }
+    if (!userId.trim())   { Alert.alert('Required', 'Please enter your Employee ID.'); return; }
+    if (!userName.trim()) { Alert.alert('Required', 'Please enter your full name.'); return; }
     embeddings.current  = [];
-    lastCapMs.current   = 0;
-    capCountRef.current = 0;
+    captureRef.current  = 0;
+    lastCaptureTs.current = 0;
     setCaptured(0);
-    setFaceOn(false);
+    setFaceFound(false);
     setError('');
     setStep('capture');
   };
 
-  // ── Permission gate (after all hooks) ─────────────────────────────────────
+  // ── Permission gate ────────────────────────────────────────────────────────
   if (!hasPermission) {
     return (
-      <View style={styles.center}>
-        <Text style={styles.permTitle}>Camera Access Needed</Text>
-        <Text style={styles.permSub}>
-          This app needs your camera to capture your face for enrollment.
+      <View style={s.center}>
+        <Text style={s.icon}>📷</Text>
+        <Text style={s.permTitle}>Camera Access Required</Text>
+        <Text style={s.permSub}>
+          Camera permission is needed to capture your face for enrollment.
         </Text>
-        <TouchableOpacity style={styles.primaryBtn} onPress={requestPermission}>
-          <Text style={styles.btnText}>Grant Camera Permission</Text>
+        <TouchableOpacity style={s.primaryBtn} onPress={requestPermission}>
+          <Text style={s.primaryBtnText}>Grant Camera Permission</Text>
         </TouchableOpacity>
       </View>
     );
   }
 
-  // ── Render ─────────────────────────────────────────────────────────────────
-
+  // ── Done ───────────────────────────────────────────────────────────────────
   if (step === 'done') {
     return (
-      <View style={styles.center}>
-        <Text style={{ fontSize: 72 }}>✅</Text>
-        <Text style={styles.doneTitle}>Enrolled!</Text>
-        <Text style={styles.doneSub}>{userName.trim()} ({userId.trim()})</Text>
+      <View style={s.center}>
+        <Text style={s.bigIcon}>✅</Text>
+        <Text style={s.successTitle}>Enrollment Complete!</Text>
+        <Text style={s.successSub}>{userName.trim()} · {userId.trim()}</Text>
       </View>
     );
   }
 
-  return (
-    <View style={styles.container}>
-
-      {/* ── FORM STEP ─────────────────────────────────────────────────────── */}
-      {step === 'form' && (
-        <View style={styles.formWrap}>
-          {onBack && (
-            <TouchableOpacity style={styles.backBtn} onPress={onBack}>
-              <Text style={styles.backText}>← Back</Text>
-            </TouchableOpacity>
-          )}
-          <Text style={styles.title}>Enroll New User</Text>
-          {!!error && <Text style={styles.errorText}>{error}</Text>}
-          <TextInput
-            style={styles.input}
-            placeholder="Employee ID  (e.g. EMP001)"
-            placeholderTextColor="#6B7280"
-            value={userId}
-            onChangeText={setUserId}
-            autoCapitalize="characters"
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Full Name"
-            placeholderTextColor="#6B7280"
-            value={userName}
-            onChangeText={setName}
-          />
-          <TouchableOpacity style={styles.primaryBtn} onPress={startCapture}>
-            <Text style={styles.btnText}>Start Enrollment</Text>
+  // ── Form ───────────────────────────────────────────────────────────────────
+  if (step === 'form') {
+    return (
+      <ScrollView contentContainerStyle={s.formScroll} keyboardShouldPersistTaps="handled">
+        {onBack && (
+          <TouchableOpacity style={s.backBtn} onPress={onBack}>
+            <Text style={s.backText}>← Back</Text>
           </TouchableOpacity>
-          <Text style={styles.hint}>
-            The camera will automatically capture {CAPTURE_NEEDED} face poses.
-            Follow the on-screen instructions.
-          </Text>
+        )}
+        <Text style={s.formTitle}>Enroll New User</Text>
+        <Text style={s.formSubtitle}>
+          The camera will automatically capture {TOTAL_CAPTURES} face poses.
+        </Text>
+        {!!error && <Text style={s.errorText}>{error}</Text>}
+
+        <Text style={s.label}>EMPLOYEE ID</Text>
+        <TextInput
+          style={s.input}
+          placeholder="e.g. EMP001"
+          placeholderTextColor="#475569"
+          value={userId}
+          onChangeText={setUserId}
+          autoCapitalize="characters"
+          returnKeyType="next"
+        />
+
+        <Text style={s.label}>FULL NAME</Text>
+        <TextInput
+          style={s.input}
+          placeholder="e.g. Ravi Kumar"
+          placeholderTextColor="#475569"
+          value={userName}
+          onChangeText={setUserName}
+          returnKeyType="done"
+        />
+
+        <TouchableOpacity style={s.primaryBtn} onPress={startCapture} activeOpacity={0.85}>
+          <Text style={s.primaryBtnText}>Start Face Capture</Text>
+        </TouchableOpacity>
+      </ScrollView>
+    );
+  }
+
+  // ── Capture / Processing ───────────────────────────────────────────────────
+  return (
+    <View style={s.cameraContainer}>
+      {/* Camera preview */}
+      {device ? (
+        <Camera
+          style={StyleSheet.absoluteFill}
+          device={device}
+          isActive={camReady && step === 'capture'}
+          video
+          frameProcessor={camReady && step === 'capture' && !isLoading ? frameProcessor : undefined}
+          fps={15}
+          pixelFormat="rgb"
+        />
+      ) : (
+        <View style={[StyleSheet.absoluteFill, s.center]}>
+          <ActivityIndicator size="large" color="#3B82F6" />
+          <Text style={s.grayText}>Initializing camera...</Text>
         </View>
       )}
 
-      {/* ── CAPTURE / PROCESSING STEP ────────────────────────────────────── */}
-      {(step === 'capture' || step === 'processing') && (
-        <>
-          {/* Camera — always rendered once we reach capture step */}
-          {device ? (
-            <Camera
-              style={StyleSheet.absoluteFill}
-              device={device}
-              isActive={camActive && step === 'capture'}
-              video
-              frameProcessor={camActive && step === 'capture' && !isLoading ? frameProcessor : undefined}
-              fps={15}
-              pixelFormat="rgb"
-            />
-          ) : (
-            <View style={[StyleSheet.absoluteFill, styles.loadingCam]}>
+      {/* Overlay UI */}
+      <View style={s.overlay}>
+        {/* Progress dots */}
+        <View style={s.dotsRow}>
+          {Array.from({ length: TOTAL_CAPTURES }).map((_, i) => (
+            <View key={i} style={[s.dot, i < captured && s.dotFilled]} />
+          ))}
+        </View>
+
+        {/* Oval guide */}
+        <View style={s.ovalWrapper}>
+          <View style={[s.oval, faceFound && s.ovalActive]} />
+        </View>
+
+        {/* Status card */}
+        <View style={s.card}>
+          {step === 'processing' ? (
+            <>
               <ActivityIndicator size="large" color="#3B82F6" />
-              <Text style={styles.gray}>Loading camera...</Text>
-            </View>
-          )}
-
-          <View style={styles.overlay}>
-            {/* Progress dots */}
-            <View style={styles.dotsRow}>
-              {Array.from({ length: CAPTURE_NEEDED }).map((_, i) => (
-                <View key={i} style={[styles.dot, i < captured && styles.dotDone]} />
-              ))}
-            </View>
-
-            {/* Oval guide */}
-            <View style={styles.ovalWrap}>
-              <View style={[styles.oval, faceOn && styles.ovalActive]} />
-            </View>
-
-            {/* Bottom card */}
-            <View style={styles.card}>
-              {step === 'processing' ? (
-                <>
-                  <ActivityIndicator size="large" color="#3B82F6" />
-                  <Text style={styles.instruction}>Saving face template...</Text>
-                </>
-              ) : isLoading ? (
-                <>
-                  <ActivityIndicator size="small" color="#94A3B8" />
-                  <Text style={styles.instruction}>Loading AI models...</Text>
-                </>
-              ) : (
-                <>
-                  <Text style={styles.poseNum}>{captured}/{CAPTURE_NEEDED} captured</Text>
-                  <Text style={styles.instruction}>
-                    {faceOn
-                      ? POSES[Math.min(captured, POSES.length - 1)]
-                      : 'Position your face in the oval'}
-                  </Text>
-                  {faceOn && (
-                    <View style={styles.faceOnBadge}>
-                      <Text style={styles.faceOnText}>Face detected — hold still</Text>
-                    </View>
-                  )}
-                </>
+              <Text style={s.cardTitle}>Saving face template...</Text>
+            </>
+          ) : isLoading ? (
+            <>
+              <ActivityIndicator size="small" color="#94A3B8" />
+              <Text style={s.cardTitle}>Loading AI models...</Text>
+            </>
+          ) : (
+            <>
+              <Text style={s.captureCount}>{captured} / {TOTAL_CAPTURES} captured</Text>
+              <Text style={s.cardTitle}>
+                {faceFound
+                  ? POSE_INSTRUCTIONS[Math.min(captured, POSE_INSTRUCTIONS.length - 1)]
+                  : 'Position your face inside the oval'}
+              </Text>
+              {faceFound && (
+                <View style={s.facePill}>
+                  <Text style={s.facePillText}>Face detected — hold still</Text>
+                </View>
               )}
-            </View>
-          </View>
-        </>
-      )}
+            </>
+          )}
+        </View>
+      </View>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  container:   { flex: 1, backgroundColor: '#000' },
-  center:      { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0F172A', padding: 24, gap: 16 },
-  loadingCam:  { justifyContent: 'center', alignItems: 'center', backgroundColor: '#000' },
-  formWrap:    { flex: 1, justifyContent: 'center', backgroundColor: '#0F172A', padding: 24, gap: 14 },
-  backBtn:     { marginBottom: 8 },
-  backText:    { color: '#60A5FA', fontSize: 15 },
-  title:       { color: '#F8FAFC', fontSize: 22, fontWeight: '700', textAlign: 'center', marginBottom: 8 },
-  doneTitle:   { color: '#F8FAFC', fontSize: 26, fontWeight: '700' },
-  doneSub:     { color: '#94A3B8', fontSize: 15 },
-  permTitle:   { color: '#F8FAFC', fontSize: 20, fontWeight: '700', textAlign: 'center' },
-  permSub:     { color: '#94A3B8', fontSize: 14, textAlign: 'center', lineHeight: 22 },
-  errorText:   { color: '#EF4444', fontSize: 13, textAlign: 'center' },
-  hint:        { color: '#6B7280', fontSize: 13, textAlign: 'center', lineHeight: 20 },
-  gray:        { color: '#94A3B8', marginTop: 12 },
+// ── Styles ─────────────────────────────────────────────────────────────────────
+const s = StyleSheet.create({
+  center:       { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0F172A', padding: 28, gap: 16 },
+  icon:         { fontSize: 48 },
+  bigIcon:      { fontSize: 80, marginBottom: 8 },
+  permTitle:    { color: '#F8FAFC', fontSize: 20, fontWeight: '700', textAlign: 'center' },
+  permSub:      { color: '#94A3B8', fontSize: 14, textAlign: 'center', lineHeight: 22 },
+  successTitle: { color: '#F8FAFC', fontSize: 24, fontWeight: '700' },
+  successSub:   { color: '#94A3B8', fontSize: 15 },
+  grayText:     { color: '#94A3B8', marginTop: 12, fontSize: 14 },
+
+  formScroll: {
+    flexGrow:        1,
+    backgroundColor: '#0F172A',
+    padding:          24,
+    paddingTop:       Platform.OS === 'ios' ? 60 : 32,
+    gap:              14,
+  },
+  backBtn:      { marginBottom: 4 },
+  backText:     { color: '#60A5FA', fontSize: 15 },
+  formTitle:    { color: '#F8FAFC', fontSize: 24, fontWeight: '700' },
+  formSubtitle: { color: '#94A3B8', fontSize: 14, lineHeight: 21 },
+  errorText:    { color: '#EF4444', fontSize: 13, backgroundColor: '#1F0A0A', padding: 12, borderRadius: 8 },
+  label:        { color: '#64748B', fontSize: 11, fontWeight: '700', letterSpacing: 1 },
   input: {
     backgroundColor: '#1E293B',
-    borderRadius:    10,
-    padding:         14,
-    color:           '#F8FAFC',
-    fontSize:        16,
-    borderWidth:     1,
-    borderColor:     '#334155',
+    borderRadius:     10,
+    padding:          14,
+    color:            '#F8FAFC',
+    fontSize:         16,
+    borderWidth:      1,
+    borderColor:      '#334155',
+    marginBottom:      4,
   },
-  primaryBtn:  { backgroundColor: '#3B82F6', borderRadius: 10, padding: 16, alignItems: 'center' },
-  btnText:     { color: '#fff', fontSize: 16, fontWeight: '600' },
-  overlay:     { flex: 1, justifyContent: 'space-between' },
+  primaryBtn:     { backgroundColor: '#3B82F6', borderRadius: 12, padding: 16, alignItems: 'center', marginTop: 8 },
+  primaryBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+
+  cameraContainer: { flex: 1, backgroundColor: '#000' },
+  overlay:         { flex: 1, justifyContent: 'space-between' },
   dotsRow: {
     flexDirection:  'row',
     justifyContent: 'center',
     gap:             10,
-    paddingTop:      Platform.OS === 'ios' ? 60 : 24,
+    paddingTop:      Platform.OS === 'ios' ? 60 : 28,
     paddingBottom:   10,
   },
-  dot:         { width: 14, height: 14, borderRadius: 7, backgroundColor: '#334155' },
-  dotDone:     { backgroundColor: '#10B981' },
-  ovalWrap:    { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  dot:       { width: 14, height: 14, borderRadius: 7, backgroundColor: '#1E293B', borderWidth: 2, borderColor: '#334155' },
+  dotFilled: { backgroundColor: '#10B981', borderColor: '#10B981' },
+  ovalWrapper: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   oval:        { width: 220, height: 280, borderRadius: 110, borderWidth: 3, borderColor: '#475569' },
-  ovalActive:  { borderColor: '#3B82F6' },
+  ovalActive:  { borderColor: '#3B82F6', borderWidth: 4 },
   card: {
-    backgroundColor: 'rgba(15,23,42,0.90)',
+    backgroundColor: 'rgba(15,23,42,0.92)',
     margin:           16,
     padding:          24,
-    borderRadius:     16,
+    borderRadius:     20,
     alignItems:       'center',
-    gap:              12,
+    gap:              10,
   },
-  poseNum:     { color: '#94A3B8', fontSize: 13 },
-  instruction: { color: '#F8FAFC', fontSize: 16, textAlign: 'center', fontWeight: '500' },
-  faceOnBadge: { backgroundColor: 'rgba(16,185,129,0.2)', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6 },
-  faceOnText:  { color: '#10B981', fontSize: 13, fontWeight: '600' },
+  captureCount: { color: '#64748B', fontSize: 13, fontWeight: '600' },
+  cardTitle:    { color: '#F8FAFC', fontSize: 16, fontWeight: '600', textAlign: 'center', lineHeight: 24 },
+  facePill:     { backgroundColor: 'rgba(16,185,129,0.15)', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 6 },
+  facePillText: { color: '#10B981', fontSize: 13, fontWeight: '600' },
 });

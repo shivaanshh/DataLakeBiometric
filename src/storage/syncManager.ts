@@ -7,16 +7,16 @@ export interface SyncResult {
   error?:  string;
 }
 
-type SyncListener = (result: SyncResult) => void;
+type Listener = (r: SyncResult) => void;
 
 class SyncManager {
-  private listener: SyncListener | null = null;
+  private listener: Listener | null = null;
 
-  startListening(cb: SyncListener) { this.listener = cb; }
-  stopListening()                  { this.listener = null; }
+  startListening(cb: Listener)  { this.listener = cb; }
+  stopListening()               { this.listener = null; }
 
   async getPendingCount(): Promise<number> {
-    try { return await db.getPendingCount(); }
+    try   { return await db.getPendingCount(); }
     catch { return 0; }
   }
 
@@ -24,11 +24,11 @@ class SyncManager {
     try {
       const records = await db.getUnsynced();
       if (!records.length) {
-        const result: SyncResult = { success: true, synced: 0, purged: 0 };
-        this.listener?.(result);
-        return result;
+        const r: SyncResult = { success: true, synced: 0, purged: 0 };
+        this.listener?.(r);
+        return r;
       }
-      // TODO: POST records to AWS endpoint when online
+      // TODO: POST to AWS when connectivity available
       await db.markSynced(records.map(r => r.id));
       const purged = await db.purgeSynced();
       const result: SyncResult = { success: true, synced: records.length, purged };
