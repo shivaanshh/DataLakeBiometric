@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
   StyleSheet, ActivityIndicator, Alert, Platform,
@@ -31,9 +31,16 @@ export default function EnrollScreen({ onEnrolled }: Props) {
   const [userName, setName]    = useState('');
   const [captured, setCaptured]= useState(0);
   const [message,  setMessage] = useState('');
-  const [error,    setError]   = useState('');
+  const [error,      setError]    = useState('');
+  const [camActive,  setCamActive]= useState(false);
 
   const frames = useRef<Array<{ rgba: Uint8Array; width: number; height: number }>>([]);
+
+  // Delay activation by 400 ms — fixes Samsung black preview on first mount
+  useEffect(() => {
+    const t = setTimeout(() => setCamActive(true), 400);
+    return () => clearTimeout(t);
+  }, []);
 
   // ── Permission gate ────────────────────────────────────────────────────
   if (!hasPermission) {
@@ -137,7 +144,8 @@ export default function EnrollScreen({ onEnrolled }: Props) {
           <Camera
             style={StyleSheet.absoluteFill}
             device={device}
-            isActive
+            isActive={camActive && step === 'capture'}
+            photo
             fps={15}
           />
           <View style={styles.overlay}>

@@ -46,6 +46,13 @@ export default function AuthScreen({ userId, onSuccess, onFailed }: Props) {
   const [syncing, setSyncing] = useState(false);
 
   const isActive = !['SUCCESS', 'FAILED'].includes(phase);
+  const [camActive, setCamActive] = useState(false);
+
+  // Delay camera activation — fixes Samsung black preview
+  useEffect(() => {
+    const t = setTimeout(() => setCamActive(true), 400);
+    return () => clearTimeout(t);
+  }, []);
 
   // ── Event handler ──────────────────────────────────────────────────────
   const handleEvent = useCallback((e: AuthEvent) => {
@@ -121,8 +128,9 @@ export default function AuthScreen({ userId, onSuccess, onFailed }: Props) {
       <Camera
         style={StyleSheet.absoluteFill}
         device={device}
-        isActive={isActive}
-        frameProcessor={isActive && !isLoading ? frameProcessor : undefined}
+        isActive={camActive && isActive}
+        video
+        frameProcessor={camActive && isActive && !isLoading ? frameProcessor : undefined}
         fps={15}
         pixelFormat="rgb"
       />
