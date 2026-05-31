@@ -29,9 +29,9 @@ export function useCamera(hasPermission: boolean): CameraDevice | null {
 
     tryFind();
 
-    const sub = Camera.addCameraDevicesChangedListener(({ addedCameraDevices }) => {
+    const sub = Camera.addCameraDevicesChangedListener((newDevices: CameraDevice[]) => {
       if (cancelled) return;
-      const front = addedCameraDevices.find(d => d.position === 'front') ?? addedCameraDevices[0];
+      const front = newDevices.find(d => d.position === 'front') ?? newDevices[0];
       if (front) setDevice(front);
     });
 
