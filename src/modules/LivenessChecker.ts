@@ -1,89 +1,123 @@
-// MediaPipe FaceMesh landmark indices used for liveness detection
-const IDX = {
-  L_EYE_TOP: 159, L_EYE_BOT: 145, L_EYE_L: 33,  L_EYE_R: 133,
-  R_EYE_TOP: 386, R_EYE_BOT: 374, R_EYE_L: 362, R_EYE_R: 263,
-  MOUTH_TOP: 13,  MOUTH_BOT: 14,  MOUTH_L: 61,  MOUTH_R: 291,
-  NOSE:      1,   CHEEK_L:   234, CHEEK_R: 454,
-} as const;
-
-export type Landmark  = [number, number, number];
 export type Challenge = 'BLINK' | 'SMILE' | 'TURN_LEFT' | 'TURN_RIGHT';
 
-export interface LivenessResult {
-  passed:    boolean;
-  challenge: Challenge | null;
-  progress:  number; // 0–1 toward passing current challenge
+export interface Landmark {
+  x: number;
+  y: number;
+  z: number;
 }
 
-const SEQUENCE: Challenge[] = ['BLINK', 'SMILE', 'TURN_LEFT', 'TURN_RIGHT'];
-const HOLD     = 6; // consecutive frames needed to pass a challenge
+const HOLD = 6;
+const TOTAL_CHALLENGES = 2;
+
+const EAR_THRESH = 0.20;
+const MAR_THRESH = 0.45;
+const YAW_THRESH = 0.08;
+
+const ALL_CHALLENGES: Challenge[] = ['BLINK', 'SMILE', 'TURN_LEFT', 'TURN_RIGHT'];
+
+function pickChallenges(): Challenge[] {
+  const shuffled = [...ALL_CHALLENGES].sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, TOTAL_CHALLENGES);
+}
+
+function ear(landmarks: Landmark[], p1: number, p2: number, p3: number, p4: number, p5: number, p6: number): number {
+  const A = dist(landmarks[p2], landmarks[p6]);
+  const B = dist(landmarks[p3], landmarks[p5]);
+  const C = dist(landmarks[p1], landmarks[p4]);
+  if (C === 0) return 0;
+  return (A + B) / (2 * C);
+}
+
+function dist(a: Landmark, b: Landmark): number {
+  return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+}
+
+function getEAR(landmarks: Landmark[]): number {
+  const left = ear(landmarks, 362, 385, 387, 263, 373, 380);
+  const right = ear(landmarks, 33, 160, 158, 133, 153, 144);
+  return (left + right) / 2;
+}
+
+function getMAR(landmarks: Landmark[]): number {
+  const A = dist(landmarks[13], landmarks[14]);
+  const B = dist(landmarks[78], landmarks[308]);
+  if (B === 0) return 0;
+  return A / B;
+}
+
+function getYaw(landmarks: Landmark[]): number {
+  const noseTip = landmarks[1];
+  const leftCheek = landmarks[234];
+  const rightCheek = landmarks[454];
+  const faceWidth = dist(leftCheek, rightCheek);
+  if (faceWidth === 0) return 0;
+  const noseMidX = (leftCheek.x + rightCheek.x) / 2;
+  return (noseTip.x - noseMidX) / faceWidth;
+}
 
 export class LivenessChecker {
-  private step  = 0;
-  private count = 0;
+  private challenges: Challenge[];
+  private currentIdx = 0;
+  private holdCount = 0;
+  private completed = false;
 
-  constructor(private readonly total = 2) {}
-
-  reset() { this.step = 0; this.count = 0; }
-
-  get challenge(): Challenge | null {
-    return this.step >= this.total ? null : SEQUENCE[this.step % SEQUENCE.length];
+  constructor() {
+    this.challenges = pickChallenges();
   }
 
-  processFrame(landmarks: Landmark[]): LivenessResult {
-    // Already passed all challenges
-    if (this.step >= this.total) return { passed: true, challenge: null, progress: 1 };
+  get currentChallenge(): Challenge | null {
+    if (this.completed) return null;
+    return this.challenges[this.currentIdx] ?? null;
+  }
 
-    // No landmarks — FaceMesh not available
-    if (landmarks.length < 468) return { passed: false, challenge: this.challenge, progress: 0 };
+  get isComplete(): boolean {
+    return this.completed;
+  }
 
-    const ch  = SEQUENCE[this.step % SEQUENCE.length];
-    const met = this.evaluate(landmarks, ch);
+  get progress(): { done: number; total: number } {
+    return { done: this.currentIdx, total: TOTAL_CHALLENGES };
+  }
 
-    if (met) {
-      this.count++;
-      if (this.count >= HOLD) { this.step++; this.count = 0; }
+  reset(): void {
+    this.challenges = pickChallenges();
+    this.currentIdx = 0;
+    this.holdCount = 0;
+    this.completed = false;
+  }
+
+  processFrame(landmarks: Landmark[]): boolean {
+    if (this.completed) return true;
+    if (landmarks.length < 468) return false;
+
+    const challenge = this.challenges[this.currentIdx];
+    const passed = this.checkChallenge(challenge, landmarks);
+
+    if (passed) {
+      this.holdCount++;
+      if (this.holdCount >= HOLD) {
+        this.holdCount = 0;
+        this.currentIdx++;
+        if (this.currentIdx >= TOTAL_CHALLENGES) {
+          this.completed = true;
+          return true;
+        }
+      }
     } else {
-      this.count = Math.max(0, this.count - 1);
+      this.holdCount = 0;
     }
-
-    const passed = this.step >= this.total;
-    return {
-      passed,
-      challenge: passed ? null : SEQUENCE[this.step % SEQUENCE.length],
-      progress:  Math.min(1, this.count / HOLD),
-    };
+    return false;
   }
 
-  private evaluate(lm: Landmark[], ch: Challenge): boolean {
-    switch (ch) {
-      case 'BLINK':      return this.ear(lm) < 0.22;
-      case 'SMILE':      return this.mar(lm) > 0.40;
-      case 'TURN_LEFT':  return this.yaw(lm) >  0.12;
-      case 'TURN_RIGHT': return this.yaw(lm) < -0.12;
+  private checkChallenge(challenge: Challenge, landmarks: Landmark[]): boolean {
+    switch (challenge) {
+      case 'BLINK':
+        return getEAR(landmarks) < EAR_THRESH;
+      case 'SMILE':
+        return getMAR(landmarks) > MAR_THRESH;
+      case 'TURN_LEFT':
+        return getYaw(landmarks) < -YAW_THRESH;
+      case 'TURN_RIGHT':
+        return getYaw(landmarks) > YAW_THRESH;
     }
   }
-
-  // Eye Aspect Ratio — measures how open the eye is
-  private ear(lm: Landmark[]): number {
-    const l = d(lm[IDX.L_EYE_TOP], lm[IDX.L_EYE_BOT]) / (d(lm[IDX.L_EYE_L], lm[IDX.L_EYE_R]) + 1e-6);
-    const r = d(lm[IDX.R_EYE_TOP], lm[IDX.R_EYE_BOT]) / (d(lm[IDX.R_EYE_L], lm[IDX.R_EYE_R]) + 1e-6);
-    return (l + r) / 2;
-  }
-
-  // Mouth Aspect Ratio — measures how open the mouth is
-  private mar(lm: Landmark[]): number {
-    return d(lm[IDX.MOUTH_TOP], lm[IDX.MOUTH_BOT]) / (d(lm[IDX.MOUTH_L], lm[IDX.MOUTH_R]) + 1e-6);
-  }
-
-  // Yaw angle — positive = left turn, negative = right turn
-  private yaw(lm: Landmark[]): number {
-    const width = lm[IDX.CHEEK_R][0] - lm[IDX.CHEEK_L][0] + 1e-6;
-    const mid   = (lm[IDX.CHEEK_L][0] + lm[IDX.CHEEK_R][0]) / 2;
-    return (lm[IDX.NOSE][0] - mid) / width;
-  }
-}
-
-function d(a: Landmark, b: Landmark): number {
-  return Math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2);
 }

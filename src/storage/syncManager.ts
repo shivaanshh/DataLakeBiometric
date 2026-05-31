@@ -1,45 +1,48 @@
-import { db } from './db';
+import NetInfo, { NetInfoState } from '@react-native-community/netinfo';
+import { getPendingAttendance, markSynced } from './db';
 
-export interface SyncResult {
-  success: boolean;
-  synced:  number;
-  purged:  number;
-  error?:  string;
+let _unsubscribe: (() => void) | null = null;
+let _onPendingChange: ((count: number) => void) | null = null;
+
+async function syncToAWS(records: { id: number; user_id: string; timestamp: number; location: string | null }[]): Promise<void> {
+  // AWS sync stub — replace with real API call
+  // e.g. await fetch('https://your-api.amazonaws.com/attendance', { method: 'POST', body: JSON.stringify(records) })
+  await markSynced(records.map(r => r.id));
 }
 
-type Listener = (r: SyncResult) => void;
+export async function forceSyncNow(): Promise<void> {
+  const state = await NetInfo.fetch();
+  if (!state.isConnected) return;
+  const pending = await getPendingAttendance();
+  if (pending.length === 0) return;
+  await syncToAWS(pending);
+  _onPendingChange?.(0);
+}
 
-class SyncManager {
-  private listener: Listener | null = null;
+export async function getPendingCount(): Promise<number> {
+  const rows = await getPendingAttendance();
+  return rows.length;
+}
 
-  startListening(cb: Listener)  { this.listener = cb; }
-  stopListening()               { this.listener = null; }
+export function startListening(onPendingChange: (count: number) => void): void {
+  _onPendingChange = onPendingChange;
 
-  async getPendingCount(): Promise<number> {
-    try   { return await db.getPendingCount(); }
-    catch { return 0; }
-  }
-
-  async forceSyncNow(): Promise<SyncResult> {
-    try {
-      const records = await db.getUnsynced();
-      if (!records.length) {
-        const r: SyncResult = { success: true, synced: 0, purged: 0 };
-        this.listener?.(r);
-        return r;
-      }
-      // TODO: POST to AWS when connectivity available
-      await db.markSynced(records.map(r => r.id));
-      const purged = await db.purgeSynced();
-      const result: SyncResult = { success: true, synced: records.length, purged };
-      this.listener?.(result);
-      return result;
-    } catch (e: any) {
-      const result: SyncResult = { success: false, synced: 0, purged: 0, error: e.message };
-      this.listener?.(result);
-      return result;
+  const handleNetChange = async (state: NetInfoState) => {
+    if (state.isConnected) {
+      await forceSyncNow();
+      const count = await getPendingCount();
+      onPendingChange(count);
     }
-  }
+  };
+
+  _unsubscribe = NetInfo.addEventListener(handleNetChange);
+
+  // Report initial pending count
+  getPendingCount().then(onPendingChange);
 }
 
-export const syncManager = new SyncManager();
+export function stopListening(): void {
+  _unsubscribe?.();
+  _unsubscribe = null;
+  _onPendingChange = null;
+}

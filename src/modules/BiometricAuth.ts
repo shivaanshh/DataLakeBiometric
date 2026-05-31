@@ -1,6 +1,7 @@
-import { db } from '../storage/db';
+import { EventEmitter } from 'eventemitter3';
 import { LivenessChecker, Landmark } from './LivenessChecker';
-import { cosineSimilarity, isMatch, averageEmbeddings } from './FaceRecognizer';
+import { averageEmbeddings, isMatch } from './FaceRecognizer';
+import { saveUser, getUser, logAttendance } from '../storage/db';
 
 export type Phase =
   | 'IDLE'
@@ -12,121 +13,143 @@ export type Phase =
   | 'ENROLLING'
   | 'ENROLLED';
 
-// Keep AuthPhase as an alias for backward-compat imports
-export type AuthPhase = Phase;
-
-export interface AuthEvent {
-  phase:       Phase;
-  message:     string;
-  challenge?:  string | null;
-  similarity?: number;
+export interface AuthState {
+  phase: Phase;
+  challenge: string | null;
+  progress: { done: number; total: number } | null;
+  message: string;
+  userName: string | null;
 }
 
-type Listener = (e: AuthEvent) => void;
+export interface ProcessFrameInput {
+  userId: string;
+  landmarks: Landmark[];
+  embedding: Float32Array | null;
+}
 
-const CHALLENGE_LABEL: Record<string, string> = {
-  BLINK:      'Please blink your eyes',
-  SMILE:      'Please give a natural smile',
-  TURN_LEFT:  'Turn your head to the left',
-  TURN_RIGHT: 'Turn your head to the right',
+const PHASE_MESSAGES: Record<Phase, string> = {
+  IDLE: 'Position your face in the oval',
+  DETECTING_FACE: 'Detecting face...',
+  LIVENESS: 'Follow the challenge',
+  RECOGNIZING: 'Verifying identity...',
+  SUCCESS: 'Access granted',
+  FAILED: 'Verification failed',
+  ENROLLING: 'Enrolling...',
+  ENROLLED: 'Enrolled successfully',
 };
 
-class BiometricAuth {
-  private liveness = new LivenessChecker(2); // 2 challenges per session
-  private phase: Phase = 'IDLE';
-  private listeners: Set<Listener> = new Set();
+const CHALLENGE_LABELS: Record<string, string> = {
+  BLINK: 'Blink your eyes',
+  SMILE: 'Smile',
+  TURN_LEFT: 'Turn head left',
+  TURN_RIGHT: 'Turn head right',
+};
 
-  // ── Event bus ─────────────────────────────────────────────────────────────
-  on(listener: Listener): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
+class BiometricAuthEmitter extends EventEmitter {
+  private liveness = new LivenessChecker();
+  private frameCount = 0;
+  private readonly FACE_FRAMES_NEEDED = 5;
+
+  private state: AuthState = {
+    phase: 'IDLE',
+    challenge: null,
+    progress: null,
+    message: PHASE_MESSAGES.IDLE,
+    userName: null,
+  };
+
+  getState(): AuthState {
+    return { ...this.state };
   }
 
-  private emit(event: AuthEvent): void {
-    this.phase = event.phase;
-    this.listeners.forEach(l => l(event));
+  reset(): void {
+    this.liveness.reset();
+    this.frameCount = 0;
+    this.setState({ phase: 'IDLE', challenge: null, progress: null, message: PHASE_MESSAGES.IDLE, userName: null });
   }
 
-  // ── Enrollment ─────────────────────────────────────────────────────────────
-  async enroll(
-    userId:    string,
-    userName:  string,
-    embeddings: Float32Array[],
-  ): Promise<void> {
-    if (!embeddings.length) throw new Error('No face data captured');
-    this.emit({ phase: 'ENROLLING', message: 'Processing face template...' });
+  async enroll(userId: string, userName: string, embeddings: Float32Array[]): Promise<void> {
+    this.setState({ phase: 'ENROLLING', challenge: null, progress: null, message: PHASE_MESSAGES.ENROLLING, userName });
     try {
-      const template = averageEmbeddings(embeddings);
-      await db.enrollUser(userId, userName, template);
-      this.emit({ phase: 'ENROLLED', message: `${userName} enrolled successfully` });
-    } catch (err: any) {
-      this.emit({ phase: 'FAILED', message: `Enrollment failed: ${err.message}` });
-      throw err;
+      const avg = averageEmbeddings(embeddings);
+      await saveUser(userId, userName, avg);
+      this.setState({ phase: 'ENROLLED', challenge: null, progress: null, message: PHASE_MESSAGES.ENROLLED, userName });
+    } catch (e) {
+      this.setState({ phase: 'FAILED', challenge: null, progress: null, message: 'Enrollment failed', userName: null });
     }
   }
 
-  // ── Authentication ─────────────────────────────────────────────────────────
-  reset(): void {
-    this.liveness.reset();
-    this.phase = 'IDLE';
-    this.emit({ phase: 'IDLE', message: 'Ready' });
-  }
+  async processAuthFrame({ userId, landmarks, embedding }: ProcessFrameInput): Promise<void> {
+    const phase = this.state.phase;
 
-  async processAuthFrame(params: {
-    userId:    string;
-    landmarks: Landmark[] | null;
-    embedding: Float32Array | null;
-  }): Promise<void> {
-    const { userId, landmarks, embedding } = params;
-
-    // Terminal states — stop processing
-    if (this.phase === 'SUCCESS' || this.phase === 'FAILED') return;
-
-    // No face in frame
-    if (!landmarks || !embedding) {
-      if (this.phase !== 'DETECTING_FACE') {
-        this.emit({ phase: 'DETECTING_FACE', message: 'Position your face in the oval' });
+    if (phase === 'IDLE' || phase === 'DETECTING_FACE') {
+      if (!embedding) {
+        this.setState({ ...this.state, phase: 'DETECTING_FACE', message: PHASE_MESSAGES.DETECTING_FACE });
+        return;
+      }
+      this.frameCount++;
+      if (this.frameCount >= this.FACE_FRAMES_NEEDED) {
+        this.frameCount = 0;
+        this.liveness.reset();
+        const c = this.liveness.currentChallenge;
+        this.setState({
+          phase: 'LIVENESS',
+          challenge: c ? CHALLENGE_LABELS[c] : null,
+          progress: this.liveness.progress,
+          message: PHASE_MESSAGES.LIVENESS,
+          userName: null,
+        });
+      } else {
+        this.setState({ ...this.state, phase: 'DETECTING_FACE', message: PHASE_MESSAGES.DETECTING_FACE });
       }
       return;
     }
 
-    // Liveness phase
-    if (this.phase !== 'RECOGNIZING') {
-      const result = this.liveness.processFrame(landmarks);
-      if (!result.passed) {
-        const label = result.challenge ? (CHALLENGE_LABEL[result.challenge] ?? result.challenge) : '...';
-        this.emit({ phase: 'LIVENESS', message: label, challenge: result.challenge });
-        return;
-      }
-      this.emit({ phase: 'RECOGNIZING', message: 'Liveness confirmed — verifying identity...' });
-    }
-
-    // Recognition phase
-    try {
-      const stored = await db.getEmbedding(userId);
-      if (!stored) {
-        this.emit({ phase: 'FAILED', message: 'User not enrolled on this device.\nPlease enroll first.' });
-        return;
-      }
-
-      const sim   = cosineSimilarity(embedding, stored);
-      const match = isMatch(embedding, stored);
-
-      if (match) {
-        await db.logAttendance({
-          id:        `att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-          userId,
-          timestamp: Date.now(),
-          location:  'on-device',
+    if (phase === 'LIVENESS') {
+      const done = this.liveness.processFrame(landmarks);
+      const c = this.liveness.currentChallenge;
+      if (done) {
+        this.setState({
+          phase: 'RECOGNIZING',
+          challenge: null,
+          progress: this.liveness.progress,
+          message: PHASE_MESSAGES.RECOGNIZING,
+          userName: null,
         });
-        this.emit({ phase: 'SUCCESS', message: 'Identity verified ✓', similarity: sim });
       } else {
-        this.emit({ phase: 'FAILED', message: 'Face not recognized', similarity: sim });
+        this.setState({
+          ...this.state,
+          challenge: c ? CHALLENGE_LABELS[c] : null,
+          progress: this.liveness.progress,
+        });
       }
-    } catch (err: any) {
-      this.emit({ phase: 'FAILED', message: `Error: ${err.message}` });
+      return;
     }
+
+    if (phase === 'RECOGNIZING') {
+      if (!embedding) return;
+      try {
+        const user = await getUser(userId);
+        if (!user) {
+          this.setState({ phase: 'FAILED', challenge: null, progress: null, message: 'User not enrolled', userName: null });
+          return;
+        }
+        if (isMatch(embedding, user.embedding)) {
+          await logAttendance(userId);
+          this.setState({ phase: 'SUCCESS', challenge: null, progress: null, message: PHASE_MESSAGES.SUCCESS, userName: user.name });
+        } else {
+          this.setState({ phase: 'FAILED', challenge: null, progress: null, message: PHASE_MESSAGES.FAILED, userName: null });
+        }
+      } catch {
+        this.setState({ phase: 'FAILED', challenge: null, progress: null, message: 'Error during recognition', userName: null });
+      }
+    }
+  }
+
+  private setState(next: AuthState): void {
+    this.state = next;
+    this.emit('stateChange', { ...next });
   }
 }
 
-export const biometricAuth = new BiometricAuth();
+export const biometricAuth = new BiometricAuthEmitter();

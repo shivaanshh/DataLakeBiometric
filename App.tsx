@@ -1,156 +1,134 @@
 import React, { useState } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity, StyleSheet,
-  SafeAreaView, StatusBar, KeyboardAvoidingView, Platform,
+  KeyboardAvoidingView,
+  Platform,
+  SafeAreaView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import EnrollScreen from './src/screens/EnrollScreen';
-import AuthScreen   from './src/screens/AuthScreen';
+import AuthScreen from './src/screens/AuthScreen';
 
-type Screen = 'home' | 'enroll' | 'auth';
+type Screen = 'home' | 'enroll' | 'auth' | 'success';
 
 export default function App() {
-  const [screen,   setScreen]   = useState<Screen>('home');
-  const [empId,    setEmpId]    = useState('');
-  const [authId,   setAuthId]   = useState('');
-  const [lastName, setLastName] = useState('');
+  const [screen, setScreen] = useState<Screen>('home');
+  const [empId, setEmpId] = useState('');
+  const [successName, setSuccessName] = useState('');
 
-  // ── Enroll screen ──────────────────────────────────────────────────────────
   if (screen === 'enroll') {
     return (
       <EnrollScreen
-        onEnrolled={(id, name) => {
-          setLastName(name);
-          setEmpId(id);
-          setScreen('home');
-        }}
-        onBack={() => setScreen('home')}
+        userId={empId.trim()}
+        userName={empId.trim()}
+        onDone={() => setScreen('home')}
+        onCancel={() => setScreen('home')}
       />
     );
   }
 
-  // ── Auth screen ────────────────────────────────────────────────────────────
   if (screen === 'auth') {
     return (
       <AuthScreen
-        userId={authId}
-        onSuccess={() => setScreen('home')}
-        onBack={() => setScreen('home')}
+        userId={empId.trim()}
+        onSuccess={(name) => { setSuccessName(name); setScreen('success'); }}
+        onCancel={() => setScreen('home')}
       />
     );
   }
 
-  // ── Home screen ────────────────────────────────────────────────────────────
-  const canAuth = empId.trim().length > 0;
+  if (screen === 'success') {
+    return (
+      <SafeAreaView style={s.center}>
+        <Text style={s.successIcon}>✓</Text>
+        <Text style={s.successTitle}>Access Granted</Text>
+        <Text style={s.successSub}>Welcome, {successName}!</Text>
+        <Text style={s.successSub}>Attendance logged.</Text>
+        <TouchableOpacity style={s.primaryBtn} onPress={() => { setScreen('home'); setEmpId(''); }}>
+          <Text style={s.primaryBtnText}>Back to Home</Text>
+        </TouchableOpacity>
+      </SafeAreaView>
+    );
+  }
+
+  const canProceed = empId.trim().length > 0;
 
   return (
-    <SafeAreaView style={s.safe}>
-      <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
-
-      <KeyboardAvoidingView
-        style={s.kav}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
-        {/* Hero */}
-        <View style={s.hero}>
-          <Text style={s.logoEmoji}>🔐</Text>
-          <Text style={s.appName}>DataLake Biometric</Text>
-          <Text style={s.tagline}>Offline Face Authentication</Text>
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    >
+      <SafeAreaView style={s.home}>
+        <View style={s.logoWrap}>
+          <Text style={s.logo}>DataLake</Text>
+          <Text style={s.logoSub}>Biometric Access</Text>
         </View>
 
-        {/* Employee ID input */}
-        <View style={s.inputSection}>
-          <Text style={s.inputLabel}>EMPLOYEE ID</Text>
+        <View style={s.card}>
+          <Text style={s.label}>Employee ID</Text>
           <TextInput
             style={s.input}
-            placeholder="Enter your employee ID  (e.g. EMP001)"
-            placeholderTextColor="#475569"
             value={empId}
             onChangeText={setEmpId}
-            autoCapitalize="characters"
+            placeholder="Enter your employee ID"
+            placeholderTextColor="#666"
+            autoCapitalize="none"
+            autoCorrect={false}
             returnKeyType="done"
           />
-          {!!lastName && (
-            <Text style={s.hint}>Last enrolled: {lastName} · {empId}</Text>
-          )}
-        </View>
 
-        {/* Action buttons */}
-        <View style={s.buttons}>
-          {/* Authenticate */}
           <TouchableOpacity
-            style={[s.btn, s.btnPrimary, !canAuth && s.btnDisabled]}
-            disabled={!canAuth}
-            activeOpacity={0.85}
-            onPress={() => {
-              setAuthId(empId.trim());
-              setScreen('auth');
-            }}
+            style={[s.primaryBtn, !canProceed && s.disabled]}
+            disabled={!canProceed}
+            onPress={() => setScreen('auth')}
           >
-            <Text style={s.btnPrimaryText}>Authenticate</Text>
-            <Text style={s.btnSub}>Verify identity via face scan</Text>
+            <Text style={s.primaryBtnText}>Authenticate</Text>
           </TouchableOpacity>
 
-          {/* Enroll */}
           <TouchableOpacity
-            style={[s.btn, s.btnOutline]}
-            activeOpacity={0.85}
+            style={[s.secondaryBtn, !canProceed && s.disabled]}
+            disabled={!canProceed}
             onPress={() => setScreen('enroll')}
           >
-            <Text style={s.btnOutlineText}>Enroll New Face</Text>
-            <Text style={[s.btnSub, { color: '#60A5FA' }]}>Register a new user</Text>
+            <Text style={s.secondaryBtnText}>Enroll New Face</Text>
           </TouchableOpacity>
         </View>
 
-        {/* Footer */}
-        <Text style={s.footer}>
-          BlazeFace · FaceMesh · MobileFaceNet · Fully Offline
-        </Text>
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+        <Text style={s.footer}>Offline biometric · Hackathon 7.0</Text>
+      </SafeAreaView>
+    </KeyboardAvoidingView>
   );
 }
 
 const s = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#0F172A' },
-  kav:  { flex: 1, justifyContent: 'center', paddingHorizontal: 24, gap: 28 },
-
-  hero:      { alignItems: 'center', gap: 8 },
-  logoEmoji: { fontSize: 60, marginBottom: 4 },
-  appName: {
-    color:         '#F8FAFC',
-    fontSize:       28,
-    fontWeight:    '800',
-    letterSpacing:  0.3,
+  home: { flex: 1, backgroundColor: '#0a0a0a', alignItems: 'center', justifyContent: 'center', padding: 24 },
+  center: { flex: 1, backgroundColor: '#0a0a0a', alignItems: 'center', justifyContent: 'center', padding: 24 },
+  logoWrap: { alignItems: 'center', marginBottom: 48 },
+  logo: { fontSize: 36, fontWeight: '800', color: '#4CAF50', letterSpacing: 1 },
+  logoSub: { fontSize: 14, color: '#888', marginTop: 4, letterSpacing: 2 },
+  card: {
+    width: '100%', backgroundColor: '#1a1a1a', borderRadius: 20,
+    padding: 24, gap: 16,
   },
-  tagline: { color: '#94A3B8', fontSize: 15 },
-
-  inputSection: { gap: 8 },
-  inputLabel:   { color: '#475569', fontSize: 11, fontWeight: '700', letterSpacing: 1.2 },
+  label: { color: '#aaa', fontSize: 13, fontWeight: '600', letterSpacing: 1 },
   input: {
-    backgroundColor: '#1E293B',
-    borderRadius:     12,
-    padding:          15,
-    color:            '#F8FAFC',
-    fontSize:         16,
-    borderWidth:      1,
-    borderColor:      '#334155',
+    backgroundColor: '#2a2a2a', borderRadius: 12, paddingHorizontal: 16, paddingVertical: 14,
+    color: '#fff', fontSize: 16, borderWidth: 1, borderColor: '#333',
   },
-  hint: { color: '#475569', fontSize: 12 },
-
-  buttons: { gap: 14 },
-  btn: {
-    borderRadius:      14,
-    paddingVertical:   18,
-    paddingHorizontal: 24,
-    alignItems:        'center',
-    gap:                4,
+  primaryBtn: {
+    backgroundColor: '#4CAF50', borderRadius: 12, paddingVertical: 16, alignItems: 'center',
   },
-  btnPrimary:     { backgroundColor: '#3B82F6' },
-  btnOutline:     { borderWidth: 1.5, borderColor: '#3B82F6' },
-  btnDisabled:    { opacity: 0.35 },
-  btnPrimaryText: { color: '#fff',     fontSize: 17, fontWeight: '700' },
-  btnOutlineText: { color: '#60A5FA',  fontSize: 17, fontWeight: '700' },
-  btnSub:         { color: 'rgba(255,255,255,0.50)', fontSize: 12 },
-
-  footer: { color: '#1E293B', fontSize: 11, textAlign: 'center' },
+  primaryBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  secondaryBtn: {
+    borderWidth: 1.5, borderColor: '#4CAF50', borderRadius: 12, paddingVertical: 16, alignItems: 'center',
+  },
+  secondaryBtnText: { color: '#4CAF50', fontSize: 16, fontWeight: '600' },
+  disabled: { opacity: 0.35 },
+  footer: { position: 'absolute', bottom: 24, color: '#444', fontSize: 12 },
+  successIcon: { fontSize: 80, color: '#4CAF50', marginBottom: 16 },
+  successTitle: { color: '#fff', fontSize: 28, fontWeight: '700', marginBottom: 8 },
+  successSub: { color: '#aaa', fontSize: 16, marginBottom: 4, textAlign: 'center' },
 });

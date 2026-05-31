@@ -1,43 +1,46 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Camera, CameraDevice } from 'react-native-vision-camera';
 
-/**
- * Returns the front camera device.
- * Only starts retrying AFTER permission is granted — prevents the hook from
- * exhausting all retries before the user has tapped "Allow" on the dialog.
- */
+const RETRY_INTERVAL = 300;
+const MAX_RETRIES = 30;
+
 export function useCamera(hasPermission: boolean): CameraDevice | null {
   const [device, setDevice] = useState<CameraDevice | null>(null);
 
   useEffect(() => {
     if (!hasPermission) return;
 
-    let alive    = true;
-    let attempts = 0;
-    const MAX    = 33; // 33 × 300 ms = ~10 s
+    let retries = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
 
-    function pick(): CameraDevice | null {
-      const list = Camera.getAvailableCameraDevices();
-      return list.find(d => d.position === 'front') ?? list[0] ?? null;
-    }
+    const tryFind = () => {
+      const devices = Camera.getAvailableCameraDevices();
+      const front = devices.find(d => d.position === 'front') ?? devices[0] ?? null;
+      if (front) {
+        if (!cancelled) setDevice(front);
+        return;
+      }
+      retries++;
+      if (retries < MAX_RETRIES && !cancelled) {
+        timer = setTimeout(tryFind, RETRY_INTERVAL);
+      }
+    };
 
-    function tryNow() {
-      if (!alive) return;
-      const d = pick();
-      if (d) { setDevice(d); return; }
-      if (++attempts < MAX) setTimeout(tryNow, 300);
-    }
+    tryFind();
 
-    // Subscribe to native change events (fires when Camera2 finishes init)
-    const sub = Camera.addCameraDevicesChangedListener(devices => {
-      if (!alive) return;
-      const d = (devices as CameraDevice[]).find(d => d.position === 'front') ?? (devices as CameraDevice[])[0] ?? null;
-      if (d) setDevice(d);
+    const sub = Camera.addCameraDevicesChangedListener(({ addedCameraDevices }) => {
+      if (cancelled) return;
+      const front = addedCameraDevices.find(d => d.position === 'front') ?? addedCameraDevices[0];
+      if (front) setDevice(front);
     });
 
-    tryNow();
-    return () => { alive = false; sub.remove(); };
-  }, [hasPermission]); // restart the retry loop when permission changes false → true
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      sub.remove();
+    };
+  }, [hasPermission]);
 
   return device;
 }

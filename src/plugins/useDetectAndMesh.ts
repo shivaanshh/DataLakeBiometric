@@ -1,173 +1,205 @@
 import { useTensorflowModel } from 'react-native-fast-tflite';
-import { useFrameProcessor }  from 'react-native-vision-camera';
-import { useRunOnJS }         from 'react-native-worklets-core';
-
-export type Landmark = [number, number, number]; // [x, y, z] normalized 0–1
+import { useFrameProcessor } from 'react-native-vision-camera';
+import { useRunOnJS } from 'react-native-worklets-core';
+import { Landmark } from '../modules/LivenessChecker';
 
 export interface DetectResult {
-  landmarks:  Landmark[];    // 468 FaceMesh points ([] when FaceMesh unavailable)
-  embedding:  Float32Array;  // 128-D L2-normalized MobileFaceNet output
-  faceRGBA:   Uint8Array;    // cropped face in RGBA
-  faceWidth:  number;
-  faceHeight: number;
+  embedding: Float32Array;
+  landmarks: Landmark[];
+  faceFound: boolean;
 }
 
-// ── Model dimensions ──────────────────────────────────────────────────────────
-const BLZ = 128;   // BlazeFace input: 128×128
-const MSH = 192;   // FaceMesh input:  192×192
-const MFN = 112;   // MobileFaceNet:   112×112
+// ── BlazeFace SSD anchors ─────────────────────────────────────────────────────
 
-// ── BlazeFace SSD anchors (896 total) ─────────────────────────────────────────
-const N_ANCHORS   = 896;
-const SCORE_THRESH = 0.60;
-const FACE_PADDING = 0.15;
+interface Anchor { cx: number; cy: number; }
 
-function buildAnchors(): Float32Array {
-  const a = new Float32Array(N_ANCHORS * 2);
-  let i = 0;
-  for (let r = 0; r < 16; r++) for (let c = 0; c < 16; c++) for (let k = 0; k < 2; k++) {
-    a[i++] = (c + 0.5) / 16; a[i++] = (r + 0.5) / 16;
-  }
-  for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) for (let k = 0; k < 6; k++) {
-    a[i++] = (c + 0.5) / 8; a[i++] = (r + 0.5) / 8;
-  }
-  return a;
-}
-const ANCHORS = buildAnchors();
-
-// ── Worklet helpers ───────────────────────────────────────────────────────────
-
-function toBlazeFaceInput(src: Uint8Array, W: number, H: number): Float32Array {
+function buildAnchors(): Anchor[] {
   'worklet';
-  const out = new Float32Array(BLZ * BLZ * 3);
-  const sx = W / BLZ, sy = H / BLZ;
-  let i = 0;
-  for (let y = 0; y < BLZ; y++) for (let x = 0; x < BLZ; x++) {
-    const s = (Math.floor(y * sy) * W + Math.floor(x * sx)) * 3;
-    out[i++] = src[s]     / 127.5 - 1;
-    out[i++] = src[s + 1] / 127.5 - 1;
-    out[i++] = src[s + 2] / 127.5 - 1;
+  const anchors: Anchor[] = [];
+  // 16×16 grid, 2 anchors each = 512
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      for (let a = 0; a < 2; a++) {
+        anchors.push({ cx: (x + 0.5) / 16, cy: (y + 0.5) / 16 });
+      }
+    }
+  }
+  // 8×8 grid, 6 anchors each = 384
+  for (let y = 0; y < 8; y++) {
+    for (let x = 0; x < 8; x++) {
+      for (let a = 0; a < 6; a++) {
+        anchors.push({ cx: (x + 0.5) / 8, cy: (y + 0.5) / 8 });
+      }
+    }
+  }
+  return anchors;
+}
+
+const ANCHORS_DATA = buildAnchors();
+const SCORE_THRESH = 0.60;
+
+interface Box { x1: number; y1: number; x2: number; y2: number; score: number; }
+
+function sigmoid(x: number): number {
+  'worklet';
+  return 1 / (1 + Math.exp(-x));
+}
+
+function decodeBestBox(scores: Float32Array, boxes: Float32Array): Box | null {
+  'worklet';
+  let bestScore = SCORE_THRESH;
+  let bestIdx = -1;
+  for (let i = 0; i < 896; i++) {
+    const s = sigmoid(scores[i]);
+    if (s > bestScore) { bestScore = s; bestIdx = i; }
+  }
+  if (bestIdx === -1) return null;
+
+  const anchor = ANCHORS_DATA[bestIdx];
+  const base = bestIdx * 16;
+  const cx = boxes[base + 0] / 128 + anchor.cx;
+  const cy = boxes[base + 1] / 128 + anchor.cy;
+  const w  = boxes[base + 2] / 128;
+  const h  = boxes[base + 3] / 128;
+
+  return {
+    x1: Math.max(0, cx - w / 2),
+    y1: Math.max(0, cy - h / 2),
+    x2: Math.min(1, cx + w / 2),
+    y2: Math.min(1, cy + h / 2),
+    score: bestScore,
+  };
+}
+
+// ── pixel helpers ─────────────────────────────────────────────────────────────
+
+function resizeAndNormalizeRGB(
+  src: Uint8Array, srcW: number, srcH: number,
+  dstW: number, dstH: number,
+  mean: number, std: number,
+): Float32Array {
+  'worklet';
+  const out = new Float32Array(dstW * dstH * 3);
+  const scaleX = srcW / dstW;
+  const scaleY = srcH / dstH;
+  for (let y = 0; y < dstH; y++) {
+    for (let x = 0; x < dstW; x++) {
+      const sx = Math.min(srcW - 1, Math.floor(x * scaleX));
+      const sy = Math.min(srcH - 1, Math.floor(y * scaleY));
+      const si = (sy * srcW + sx) * 3;
+      const di = (y * dstW + x) * 3;
+      out[di]     = (src[si]     - mean) / std;
+      out[di + 1] = (src[si + 1] - mean) / std;
+      out[di + 2] = (src[si + 2] - mean) / std;
+    }
   }
   return out;
 }
 
-function decodeBestBox(
-  scores: Float32Array, regs: Float32Array, anch: Float32Array,
-): { x1: number; y1: number; x2: number; y2: number } | null {
+function cropFace(
+  src: Uint8Array, srcW: number, srcH: number,
+  box: Box, padding: number,
+  dstW: number, dstH: number,
+  mean: number, std: number,
+): Float32Array {
   'worklet';
-  let best = -1, top = SCORE_THRESH;
-  for (let i = 0; i < N_ANCHORS; i++) if (scores[i] > top) { top = scores[i]; best = i; }
-  if (best < 0) return null;
-  const ax = anch[best * 2], ay = anch[best * 2 + 1];
-  const cx = regs[best * 16]     / BLZ + ax;
-  const cy = regs[best * 16 + 1] / BLZ + ay;
-  const hw = regs[best * 16 + 2] / BLZ / 2;
-  const hh = regs[best * 16 + 3] / BLZ / 2;
-  return { x1: cx - hw, y1: cy - hh, x2: cx + hw, y2: cy + hh };
+  const pw = (box.x2 - box.x1) * padding;
+  const ph = (box.y2 - box.y1) * padding;
+  const x1 = Math.max(0, box.x1 - pw);
+  const y1 = Math.max(0, box.y1 - ph);
+  const x2 = Math.min(1, box.x2 + pw);
+  const y2 = Math.min(1, box.y2 + ph);
+
+  const cropW = Math.max(1, Math.round((x2 - x1) * srcW));
+  const cropH = Math.max(1, Math.round((y2 - y1) * srcH));
+  const offX = Math.round(x1 * srcW);
+  const offY = Math.round(y1 * srcH);
+
+  const out = new Float32Array(dstW * dstH * 3);
+  const scaleX = cropW / dstW;
+  const scaleY = cropH / dstH;
+
+  for (let y = 0; y < dstH; y++) {
+    for (let x = 0; x < dstW; x++) {
+      const sx = Math.min(srcW - 1, offX + Math.floor(x * scaleX));
+      const sy = Math.min(srcH - 1, offY + Math.floor(y * scaleY));
+      const si = (sy * srcW + sx) * 3;
+      const di = (y * dstW + x) * 3;
+      out[di]     = (src[si]     - mean) / std;
+      out[di + 1] = (src[si + 1] - mean) / std;
+      out[di + 2] = (src[si + 2] - mean) / std;
+    }
+  }
+  return out;
 }
 
-function cropToRGBA(
-  src: Uint8Array, W: number, H: number,
-  x1: number, y1: number, x2: number, y2: number,
-): { rgba: Uint8Array; cW: number; cH: number } {
+function l2NormalizeWorklet(v: Float32Array): Float32Array {
   'worklet';
-  const p  = FACE_PADDING;
-  const px1 = Math.max(0, Math.floor((x1 - p) * W));
-  const py1 = Math.max(0, Math.floor((y1 - p) * H));
-  const px2 = Math.min(W - 1, Math.ceil((x2 + p) * W));
-  const py2 = Math.min(H - 1, Math.ceil((y2 + p) * H));
-  const cW = px2 - px1, cH = py2 - py1;
-  const rgba = new Uint8Array(cW * cH * 4);
-  for (let row = 0; row < cH; row++) for (let col = 0; col < cW; col++) {
-    const s = ((py1 + row) * W + (px1 + col)) * 3; // pixelFormat=rgb
-    const d = (row * cW + col) * 4;
-    rgba[d] = src[s]; rgba[d+1] = src[s+1]; rgba[d+2] = src[s+2]; rgba[d+3] = 255;
-  }
-  return { rgba, cW, cH };
-}
-
-function toMeshInput(rgba: Uint8Array, cW: number, cH: number): Float32Array {
-  'worklet';
-  const out = new Float32Array(MSH * MSH * 3);
-  const sx = cW / MSH, sy = cH / MSH;
-  let i = 0;
-  for (let y = 0; y < MSH; y++) for (let x = 0; x < MSH; x++) {
-    const s = (Math.floor(y * sy) * cW + Math.floor(x * sx)) * 4;
-    out[i++] = rgba[s] / 255; out[i++] = rgba[s+1] / 255; out[i++] = rgba[s+2] / 255;
-  }
+  let norm = 0;
+  for (let i = 0; i < v.length; i++) norm += v[i] * v[i];
+  norm = Math.sqrt(norm);
+  if (norm === 0) return v;
+  const out = new Float32Array(v.length);
+  for (let i = 0; i < v.length; i++) out[i] = v[i] / norm;
   return out;
 }
 
 function parseLandmarks(raw: Float32Array): Landmark[] {
   'worklet';
-  const lms: Landmark[] = [];
-  for (let i = 0; i < 468; i++) lms.push([raw[i*3]/MSH, raw[i*3+1]/MSH, raw[i*3+2]/MSH]);
-  return lms;
-}
-
-function toMFNInput(rgba: Uint8Array, cW: number, cH: number): Float32Array {
-  'worklet';
-  const out = new Float32Array(MFN * MFN * 3);
-  const sx = cW / MFN, sy = cH / MFN;
-  let i = 0;
-  for (let y = 0; y < MFN; y++) for (let x = 0; x < MFN; x++) {
-    const s = (Math.floor(y * sy) * cW + Math.floor(x * sx)) * 4;
-    out[i++] = (rgba[s]     - 127.5) / 128;
-    out[i++] = (rgba[s + 1] - 127.5) / 128;
-    out[i++] = (rgba[s + 2] - 127.5) / 128;
+  const pts: Landmark[] = [];
+  for (let i = 0; i < 468; i++) {
+    pts.push({ x: raw[i * 3], y: raw[i * 3 + 1], z: raw[i * 3 + 2] });
   }
-  return out;
+  return pts;
 }
 
-function l2Normalize(v: Float32Array): Float32Array {
-  'worklet';
-  let n = 0;
-  for (let i = 0; i < v.length; i++) n += v[i] * v[i];
-  n = Math.sqrt(n) + 1e-10;
-  const out = new Float32Array(v.length);
-  for (let i = 0; i < v.length; i++) out[i] = v[i] / n;
-  return out;
-}
+// ── hook ──────────────────────────────────────────────────────────────────────
 
-// ── Hook ──────────────────────────────────────────────────────────────────────
-
-export function useDetectAndMesh(onResult: (r: DetectResult | null) => void) {
+export function useDetectAndMesh(onDetect: (result: DetectResult | null) => void) {
   const blaze = useTensorflowModel(require('../../models/blazeface.tflite'));
   const mesh  = useTensorflowModel(require('../../models/facemesh.tflite'));
   const mfn   = useTensorflowModel(require('../../models/mobilefacenet_int8.tflite'));
 
-  const notify = useRunOnJS(onResult, [onResult]);
+  const isLoading = blaze.state !== 'loaded' || mfn.state !== 'loaded';
+
+  const notifyJS = useRunOnJS((result: DetectResult | null) => {
+    onDetect(result);
+  }, [onDetect]);
 
   const frameProcessor = useFrameProcessor((frame) => {
     'worklet';
-    if (blaze.state !== 'loaded' || !blaze.model) return;
-    if (mfn.state   !== 'loaded' || !mfn.model)   return;
+    if (!blaze.model || !mfn.model) return;
 
-    const W   = frame.width;
-    const H   = frame.height;
-    const src = new Uint8Array(frame.toArrayBuffer());
+    const buf = frame.toArrayBuffer();
+    const pixels = new Uint8Array(buf);
+    const W = frame.width;
+    const H = frame.height;
 
-    // Stage 1 — face detection
-    const blazeOut = blaze.model.runSync([toBlazeFaceInput(src, W, H)]) as Float32Array[];
-    const box      = decodeBestBox(blazeOut[0], blazeOut[1], ANCHORS);
-    if (!box) { notify(null); return; }
+    // 1. BlazeFace — 128×128, normalized to [-1, 1]
+    const blazeInput = resizeAndNormalizeRGB(pixels, W, H, 128, 128, 128, 128);
+    const [blazeScores, blazeBoxes] = blaze.model.runSync([blazeInput]) as [Float32Array, Float32Array];
+    const box = decodeBestBox(blazeScores, blazeBoxes);
 
-    const { rgba, cW, cH } = cropToRGBA(src, W, H, box.x1, box.y1, box.x2, box.y2);
-
-    // Stage 2 — landmarks (optional)
-    let landmarks: Landmark[] = [];
-    if (mesh.state === 'loaded' && mesh.model) {
-      const meshOut = mesh.model.runSync([toMeshInput(rgba, cW, cH)]) as Float32Array[];
-      if (meshOut[0]?.length >= 468 * 3) landmarks = parseLandmarks(meshOut[0]);
+    if (!box) {
+      notifyJS(null);
+      return;
     }
 
-    // Stage 3 — face embedding
-    const mfnOut   = mfn.model.runSync([toMFNInput(rgba, cW, cH)]) as Float32Array[];
-    const embedding = l2Normalize(mfnOut[0] as Float32Array);
+    // 2. MobileFaceNet — 112×112 crop, normalized to [-1, 1]
+    const mfnInput = cropFace(pixels, W, H, box, 0.15, 112, 112, 128, 128);
+    const [rawEmbedding] = mfn.model.runSync([mfnInput]) as [Float32Array];
+    const embedding = l2NormalizeWorklet(rawEmbedding);
 
-    notify({ landmarks, embedding, faceRGBA: rgba, faceWidth: cW, faceHeight: cH });
-  }, [blaze, mesh, mfn, notify]);
+    // 3. FaceMesh — 192×192 crop, normalized to [0, 1] (optional)
+    let landmarks: Landmark[] = [];
+    if (mesh.model) {
+      const meshInput = cropFace(pixels, W, H, box, 0.15, 192, 192, 0, 255);
+      const [rawLandmarks] = mesh.model.runSync([meshInput]) as [Float32Array];
+      landmarks = parseLandmarks(rawLandmarks);
+    }
 
-  const isLoading = blaze.state !== 'loaded' || mfn.state !== 'loaded';
+    notifyJS({ embedding, landmarks, faceFound: true });
+  }, [blaze.model, mesh.model, mfn.model]);
+
   return { frameProcessor, isLoading };
 }

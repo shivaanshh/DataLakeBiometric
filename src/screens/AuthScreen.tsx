@@ -1,255 +1,218 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity,
-  ActivityIndicator, Alert, Platform,
+  ActivityIndicator,
+  SafeAreaView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from 'react-native';
-import { Camera, useCameraPermission } from 'react-native-vision-camera';
-import { useCamera }                   from '../plugins/useCamera';
+import { Camera } from 'react-native-vision-camera';
+import { useCamera } from '../plugins/useCamera';
 import { useDetectAndMesh, DetectResult } from '../plugins/useDetectAndMesh';
-import { biometricAuth, Phase, AuthEvent } from '../modules/BiometricAuth';
-import { syncManager, SyncResult }     from '../storage/syncManager';
-
-// ── Types & constants ─────────────────────────────────────────────────────────
-interface Props {
-  userId:    string;
-  onSuccess?: () => void;
-  onBack?:    () => void;
-}
-
-const PHASE_COLOR: Record<Phase, string> = {
-  IDLE:           '#6B7280',
-  DETECTING_FACE: '#3B82F6',
-  LIVENESS:       '#F59E0B',
-  RECOGNIZING:    '#8B5CF6',
-  SUCCESS:        '#10B981',
-  FAILED:         '#EF4444',
-  ENROLLING:      '#3B82F6',
-  ENROLLED:       '#10B981',
-};
+import { biometricAuth, AuthState, Phase } from '../modules/BiometricAuth';
+import { startListening, stopListening } from '../storage/syncManager';
 
 const CHALLENGE_EMOJI: Record<string, string> = {
-  BLINK:      '👁',
-  SMILE:      '😊',
-  TURN_LEFT:  '←',
-  TURN_RIGHT: '→',
+  'Blink your eyes': '👁',
+  'Smile': '😊',
+  'Turn head left': '←',
+  'Turn head right': '→',
 };
 
-// ── Component ─────────────────────────────────────────────────────────────────
-export default function AuthScreen({ userId, onSuccess, onBack }: Props) {
-  // Camera hooks — always called unconditionally
-  const { hasPermission, requestPermission } = useCameraPermission();
+interface Props {
+  userId: string;
+  onSuccess: (userName: string) => void;
+  onCancel: () => void;
+}
+
+export default function AuthScreen({ userId, onSuccess, onCancel }: Props) {
+  const { hasPermission, requestPermission } = Camera.useCameraPermission();
   const device = useCamera(hasPermission);
 
-  // State
-  const [phase,    setPhase]    = useState<Phase>('IDLE');
-  const [message,  setMessage]  = useState('Initializing...');
-  const [sim,      setSim]      = useState<number | null>(null);
-  const [pending,  setPending]  = useState(0);
-  const [syncing,  setSyncing]  = useState(false);
+  const [authState, setAuthState] = useState<AuthState>(biometricAuth.getState());
   const [camReady, setCamReady] = useState(false);
-  const [challenge, setChallenge] = useState<string | null>(null);
+  const [pendingSync, setPendingSync] = useState(0);
 
-  const phaseRef = useRef<Phase>('IDLE');
+  const phaseRef = useRef<Phase>(authState.phase);
 
-  // Samsung Galaxy black-preview fix
   useEffect(() => {
-    const t = setTimeout(() => setCamReady(true), 400);
-    return () => clearTimeout(t);
+    if (!hasPermission) requestPermission();
+  }, [hasPermission, requestPermission]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setCamReady(true), 400);
+    return () => clearTimeout(timer);
   }, []);
 
-  // Subscribe to BiometricAuth events & sync
   useEffect(() => {
     biometricAuth.reset();
 
-    const off = biometricAuth.on((e: AuthEvent) => {
-      phaseRef.current = e.phase;
-      setPhase(e.phase);
-      setMessage(e.message);
-      setChallenge(e.challenge ?? null);
-      if (e.similarity !== undefined) setSim(e.similarity);
-      if (e.phase === 'SUCCESS') onSuccess?.();
-    });
-
-    syncManager.startListening(async (r: SyncResult) => {
-      setSyncing(false);
-      setPending(await syncManager.getPendingCount());
-      if (r.synced > 0) Alert.alert('Sync complete', `${r.synced} attendance records uploaded.`);
-    });
-    syncManager.getPendingCount().then(setPending);
-
-    return () => {
-      off();
-      syncManager.stopListening();
+    const handleState = (state: AuthState) => {
+      phaseRef.current = state.phase;
+      setAuthState({ ...state });
+      if (state.phase === 'SUCCESS' && state.userName) {
+        onSuccess(state.userName);
+      }
     };
+
+    biometricAuth.on('stateChange', handleState);
+    return () => { biometricAuth.off('stateChange', handleState); };
   }, [onSuccess]);
 
-  // ── Frame processor callback ───────────────────────────────────────────────
-  const onDetect = useCallback((r: DetectResult | null) => {
-    if (phaseRef.current === 'SUCCESS' || phaseRef.current === 'FAILED') return;
+  useEffect(() => {
+    startListening(setPendingSync);
+    return () => stopListening();
+  }, []);
+
+  const onDetect = useCallback((result: DetectResult | null) => {
+    const phase = phaseRef.current;
+    if (phase === 'SUCCESS' || phase === 'FAILED' || phase === 'IDLE') return;
 
     biometricAuth.processAuthFrame({
       userId,
-      landmarks: r?.landmarks ?? null,
-      embedding: r?.embedding ?? null,
+      landmarks: result?.landmarks ?? [],
+      embedding: result?.embedding ?? null,
     });
   }, [userId]);
 
   const { frameProcessor, isLoading } = useDetectAndMesh(onDetect);
 
-  const isActive = !['SUCCESS', 'FAILED'].includes(phase);
-  const color    = PHASE_COLOR[phase];
+  const isTerminal = authState.phase === 'SUCCESS' || authState.phase === 'FAILED';
 
-  // ── Permission gate ────────────────────────────────────────────────────────
-  if (!hasPermission) {
-    return (
-      <View style={s.center}>
-        <Text style={s.permTitle}>Camera Access Required</Text>
-        <Text style={s.permSub}>Camera permission is needed for face authentication.</Text>
-        <TouchableOpacity style={s.primaryBtn} onPress={requestPermission}>
-          <Text style={s.primaryBtnText}>Grant Permission</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
+  const ovalColor =
+    authState.phase === 'SUCCESS' ? '#4CAF50' :
+    authState.phase === 'FAILED'  ? '#f44336' :
+    authState.phase === 'LIVENESS' ? '#FF9800' : '#2196F3';
 
-  if (!device) {
-    return (
-      <View style={s.center}>
-        <ActivityIndicator size="large" color="#3B82F6" />
-        <Text style={s.grayText}>Initializing camera...</Text>
-      </View>
-    );
-  }
-
-  // ── Main render ────────────────────────────────────────────────────────────
   return (
-    <View style={s.container}>
-      {/* Camera feed */}
-      <Camera
-        style={StyleSheet.absoluteFill}
-        device={device}
-        isActive={camReady && isActive}
-        video
-        frameProcessor={camReady && isActive && !isLoading ? frameProcessor : undefined}
-        fps={15}
-        pixelFormat="rgb"
-      />
-
-      {/* Overlay */}
-      <View style={s.overlay}>
-
-        {/* ── Top bar ─────────────────────────────────────────────────── */}
-        <View style={s.topBar}>
-          <View>
-            {onBack && (
-              <TouchableOpacity onPress={onBack} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                <Text style={s.backText}>← Back</Text>
-              </TouchableOpacity>
-            )}
-            <Text style={s.appTitle}>DataLake Biometric</Text>
-            <Text style={s.userLabel}>ID: {userId}</Text>
+    <SafeAreaView style={s.container}>
+      <View style={s.header}>
+        <TouchableOpacity onPress={onCancel}>
+          <Text style={s.cancelText}>Cancel</Text>
+        </TouchableOpacity>
+        <Text style={s.title}>Authenticate</Text>
+        {pendingSync > 0 ? (
+          <View style={s.syncBadge}>
+            <Text style={s.syncText}>{pendingSync} pending</Text>
           </View>
-
-          {/* Sync button */}
-          <TouchableOpacity
-            onPress={async () => { setSyncing(true); await syncManager.forceSyncNow(); }}
-            disabled={syncing}
-          >
-            <View style={[s.syncBadge, pending > 0 ? s.syncPending : s.syncOk]}>
-              {syncing
-                ? <ActivityIndicator size="small" color="#fff" />
-                : <Text style={s.syncText}>{pending > 0 ? `↑ ${pending}` : '✓ Synced'}</Text>
-              }
-            </View>
-          </TouchableOpacity>
-        </View>
-
-        {/* ── Oval guide ──────────────────────────────────────────────── */}
-        <View style={s.ovalWrapper}>
-          <View style={[s.oval, { borderColor: color }]} />
-          {challenge && phase === 'LIVENESS' && (
-            <Text style={s.challengeEmoji}>{CHALLENGE_EMOJI[challenge] ?? '?'}</Text>
-          )}
-        </View>
-
-        {/* ── Status card ─────────────────────────────────────────────── */}
-        <View style={s.card}>
-          {isLoading ? (
-            <>
-              <ActivityIndicator size="small" color="#94A3B8" />
-              <Text style={s.cardMessage}>Loading AI models...</Text>
-            </>
-          ) : (
-            <>
-              <View style={[s.phaseDot, { backgroundColor: color }]} />
-              <Text style={s.cardMessage}>{message}</Text>
-              {sim !== null && (
-                <Text style={s.simText}>Confidence: {(sim * 100).toFixed(1)}%</Text>
-              )}
-              {(phase === 'SUCCESS' || phase === 'FAILED') && (
-                <TouchableOpacity
-                  style={[s.retryBtn, { backgroundColor: phase === 'SUCCESS' ? '#10B981' : '#3B82F6' }]}
-                  onPress={() => {
-                    setSim(null);
-                    setChallenge(null);
-                    biometricAuth.reset();
-                  }}
-                >
-                  <Text style={s.retryBtnText}>
-                    {phase === 'SUCCESS' ? 'Authenticate Again' : 'Try Again'}
-                  </Text>
-                </TouchableOpacity>
-              )}
-            </>
-          )}
-        </View>
+        ) : (
+          <View style={{ width: 80 }} />
+        )}
       </View>
-    </View>
+
+      <View style={s.cameraWrap}>
+        {device && camReady && !isLoading && !isTerminal ? (
+          <Camera
+            style={StyleSheet.absoluteFill}
+            device={device}
+            isActive={true}
+            frameProcessor={frameProcessor}
+            pixelFormat="rgb"
+            photo={false}
+            video={false}
+          />
+        ) : (
+          <View style={s.loadingOverlay}>
+            {isTerminal ? null : (
+              <>
+                <ActivityIndicator size="large" color="#fff" />
+                <Text style={s.loadingText}>
+                  {isLoading ? 'Loading models...' : 'Starting camera...'}
+                </Text>
+              </>
+            )}
+          </View>
+        )}
+
+        <View style={[s.ovalBorder, { borderColor: ovalColor }]} />
+
+        {authState.phase === 'LIVENESS' && authState.challenge && (
+          <View style={s.challengeOverlay}>
+            <Text style={s.challengeEmoji}>
+              {CHALLENGE_EMOJI[authState.challenge] ?? '?'}
+            </Text>
+            <Text style={s.challengeText}>{authState.challenge}</Text>
+            {authState.progress && (
+              <Text style={s.progressText}>
+                {authState.progress.done}/{authState.progress.total}
+              </Text>
+            )}
+          </View>
+        )}
+
+        {authState.phase === 'SUCCESS' && (
+          <View style={s.resultOverlay}>
+            <Text style={s.resultIcon}>✓</Text>
+            <Text style={s.resultText}>Welcome, {authState.userName}!</Text>
+          </View>
+        )}
+
+        {authState.phase === 'FAILED' && (
+          <View style={s.resultOverlay}>
+            <Text style={[s.resultIcon, { color: '#f44336' }]}>✗</Text>
+            <Text style={[s.resultText, { color: '#f44336' }]}>{authState.message}</Text>
+          </View>
+        )}
+      </View>
+
+      <View style={s.footer}>
+        {!isTerminal ? (
+          <Text style={s.statusText}>{authState.message}</Text>
+        ) : (
+          <TouchableOpacity
+            style={[s.btn, authState.phase === 'FAILED' && s.btnRetry]}
+            onPress={() => {
+              biometricAuth.reset();
+              setAuthState(biometricAuth.getState());
+              phaseRef.current = 'IDLE';
+            }}
+          >
+            <Text style={s.btnText}>
+              {authState.phase === 'SUCCESS' ? 'Done' : 'Try Again'}
+            </Text>
+          </TouchableOpacity>
+        )}
+      </View>
+    </SafeAreaView>
   );
 }
 
-// ── Styles ─────────────────────────────────────────────────────────────────────
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
-  center:    { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0F172A', padding: 28, gap: 16 },
-  permTitle: { color: '#F8FAFC', fontSize: 20, fontWeight: '700', textAlign: 'center' },
-  permSub:   { color: '#94A3B8', fontSize: 14, textAlign: 'center', lineHeight: 22 },
-  grayText:  { color: '#94A3B8', marginTop: 12, fontSize: 14 },
-  primaryBtn:     { backgroundColor: '#3B82F6', borderRadius: 12, paddingVertical: 14, paddingHorizontal: 28 },
-  primaryBtnText: { color: '#fff', fontSize: 15, fontWeight: '700' },
-
-  overlay:    { flex: 1, justifyContent: 'space-between' },
-  topBar: {
-    flexDirection:   'row',
-    justifyContent:  'space-between',
-    alignItems:      'flex-end',
-    padding:          16,
-    paddingTop:       Platform.OS === 'ios' ? 56 : 18,
-    backgroundColor: 'rgba(0,0,0,0.60)',
+  header: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 16, paddingVertical: 12,
   },
-  backText:  { color: '#60A5FA', fontSize: 14, marginBottom: 6 },
-  appTitle:  { color: '#F8FAFC', fontSize: 16, fontWeight: '700' },
-  userLabel: { color: '#94A3B8', fontSize: 12, marginTop: 2 },
-  syncBadge:   { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20 },
-  syncPending: { backgroundColor: '#F59E0B' },
-  syncOk:      { backgroundColor: '#10B981' },
-  syncText:    { color: '#fff', fontSize: 12, fontWeight: '700' },
-
-  ovalWrapper:    { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  oval:           { width: 220, height: 280, borderRadius: 110, borderWidth: 3 },
-  challengeEmoji: { position: 'absolute', bottom: -44, fontSize: 42 },
-
-  card: {
-    backgroundColor: 'rgba(15,23,42,0.90)',
-    margin:           16,
-    padding:          22,
-    borderRadius:     20,
-    alignItems:       'center',
-    gap:               8,
+  title: { color: '#fff', fontSize: 18, fontWeight: '600' },
+  cancelText: { color: '#2196F3', fontSize: 16 },
+  syncBadge: {
+    backgroundColor: '#FF9800', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4,
   },
-  phaseDot:    { width: 10, height: 10, borderRadius: 5, marginBottom: 2 },
-  cardMessage: { color: '#F8FAFC', fontSize: 16, fontWeight: '500', textAlign: 'center', lineHeight: 24 },
-  simText:     { color: '#94A3B8', fontSize: 13 },
-  retryBtn:    { borderRadius: 10, paddingHorizontal: 24, paddingVertical: 10, marginTop: 4 },
-  retryBtnText:{ color: '#fff', fontWeight: '700', fontSize: 14 },
+  syncText: { color: '#fff', fontSize: 12, fontWeight: '600' },
+  cameraWrap: { flex: 1, position: 'relative', overflow: 'hidden' },
+  loadingOverlay: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#111' },
+  loadingText: { color: '#fff', marginTop: 12, fontSize: 14 },
+  ovalBorder: {
+    position: 'absolute', top: '10%', left: '10%', right: '10%', bottom: '10%',
+    borderRadius: 200, borderWidth: 3,
+  },
+  challengeOverlay: {
+    position: 'absolute', bottom: 40, alignSelf: 'center', alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.65)', borderRadius: 16, padding: 16, minWidth: 160,
+  },
+  challengeEmoji: { fontSize: 48, marginBottom: 8 },
+  challengeText: { color: '#fff', fontSize: 18, fontWeight: '600', textAlign: 'center' },
+  progressText: { color: '#aaa', fontSize: 14, marginTop: 4 },
+  resultOverlay: {
+    position: 'absolute', inset: 0, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.75)',
+  },
+  resultIcon: { fontSize: 80, color: '#4CAF50', marginBottom: 16 },
+  resultText: { color: '#fff', fontSize: 22, fontWeight: '700', textAlign: 'center', paddingHorizontal: 24 },
+  footer: { padding: 24, alignItems: 'center', minHeight: 90 },
+  statusText: { color: '#ccc', fontSize: 16, textAlign: 'center' },
+  btn: { backgroundColor: '#4CAF50', borderRadius: 12, paddingHorizontal: 40, paddingVertical: 14 },
+  btnRetry: { backgroundColor: '#f44336' },
+  btnText: { color: '#fff', fontSize: 16, fontWeight: '600' },
 });
