@@ -199,7 +199,7 @@ export function useDetectAndMesh(onDetect: (result: DetectResult | null) => void
     }
 
     notifyJS({ embedding, landmarks, faceFound: true });
-  }, [blaze.model, mesh.model, mfn.model]);
+  }, [blaze.model, mesh.model, mfn.model, notifyJS]);
 
   return { frameProcessor, isLoading };
 }

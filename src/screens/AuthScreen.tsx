@@ -205,7 +205,8 @@ const s = StyleSheet.create({
   challengeText: { color: '#fff', fontSize: 18, fontWeight: '600', textAlign: 'center' },
   progressText: { color: '#aaa', fontSize: 14, marginTop: 4 },
   resultOverlay: {
-    position: 'absolute', inset: 0, alignItems: 'center', justifyContent: 'center',
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(0,0,0,0.75)',
   },
   resultIcon: { fontSize: 80, color: '#4CAF50', marginBottom: 16 },

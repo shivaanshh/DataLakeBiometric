@@ -1,7 +1,26 @@
-import { EventEmitter } from 'eventemitter3';
 import { LivenessChecker, Landmark } from './LivenessChecker';
 import { averageEmbeddings, isMatch } from './FaceRecognizer';
 import { saveUser, getUser, logAttendance } from '../storage/db';
+
+class SimpleEmitter {
+  private handlers: Map<string, ((...args: any[]) => void)[]> = new Map();
+  on(event: string, handler: (...args: any[]) => void): this {
+    if (!this.handlers.has(event)) this.handlers.set(event, []);
+    this.handlers.get(event)!.push(handler);
+    return this;
+  }
+  off(event: string, handler: (...args: any[]) => void): this {
+    const arr = this.handlers.get(event);
+    if (arr) {
+      const idx = arr.indexOf(handler);
+      if (idx !== -1) arr.splice(idx, 1);
+    }
+    return this;
+  }
+  emit(event: string, ...args: any[]): void {
+    this.handlers.get(event)?.forEach(h => h(...args));
+  }
+}
 
 export type Phase =
   | 'IDLE'
@@ -45,10 +64,11 @@ const CHALLENGE_LABELS: Record<string, string> = {
   TURN_RIGHT: 'Turn head right',
 };
 
-class BiometricAuthEmitter extends EventEmitter {
+class BiometricAuthEmitter extends SimpleEmitter {
   private liveness = new LivenessChecker();
   private frameCount = 0;
   private readonly FACE_FRAMES_NEEDED = 5;
+  private _matchingInProgress = false;
 
   private state: AuthState = {
     phase: 'IDLE',
@@ -65,6 +85,7 @@ class BiometricAuthEmitter extends EventEmitter {
   reset(): void {
     this.liveness.reset();
     this.frameCount = 0;
+    this._matchingInProgress = false;
     this.setState({ phase: 'IDLE', challenge: null, progress: null, message: PHASE_MESSAGES.IDLE, userName: null });
   }
 
@@ -127,7 +148,8 @@ class BiometricAuthEmitter extends EventEmitter {
     }
 
     if (phase === 'RECOGNIZING') {
-      if (!embedding) return;
+      if (!embedding || this._matchingInProgress) return;
+      this._matchingInProgress = true;
       try {
         const user = await getUser(userId);
         if (!user) {
@@ -142,6 +164,8 @@ class BiometricAuthEmitter extends EventEmitter {
         }
       } catch {
         this.setState({ phase: 'FAILED', challenge: null, progress: null, message: 'Error during recognition', userName: null });
+      } finally {
+        this._matchingInProgress = false;
       }
     }
   }
