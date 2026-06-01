@@ -48,6 +48,10 @@
       "models/**",
       "assets/**"
     ],
-    "extra": {}
+    "extra": {
+      "eas": {
+        "projectId": "f51e6a9b-295c-43ef-ab40-83f861ce656e"
+      }
+    }
   }
 }
