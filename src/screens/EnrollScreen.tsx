@@ -7,8 +7,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { Camera, useCameraPermission } from 'react-native-vision-camera';
-import { useCamera } from '../plugins/useCamera';
+import { Camera, useCameraPermission, useCameraDevice } from 'react-native-vision-camera';
 import { useDetectAndMesh, DetectResult } from '../plugins/useDetectAndMesh';
 import { biometricAuth } from '../modules/BiometricAuth';
 
@@ -24,7 +23,9 @@ interface Props {
 
 export default function EnrollScreen({ userId, userName, onDone, onCancel }: Props) {
   const { hasPermission, requestPermission } = useCameraPermission();
-  const device = useCamera(hasPermission);
+  const frontDevice = useCameraDevice('front');
+  const backDevice = useCameraDevice('back');
+  const device = frontDevice ?? backDevice;
 
   const [step, setStep] = useState<'camera' | 'processing' | 'done' | 'error'>('camera');
   const [faceFound, setFaceFound] = useState(false);

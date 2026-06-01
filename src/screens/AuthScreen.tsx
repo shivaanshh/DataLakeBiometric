@@ -7,8 +7,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { Camera, useCameraPermission } from 'react-native-vision-camera';
-import { useCamera } from '../plugins/useCamera';
+import { Camera, useCameraPermission, useCameraDevice } from 'react-native-vision-camera';
 import { useDetectAndMesh, DetectResult } from '../plugins/useDetectAndMesh';
 import { biometricAuth, AuthState, Phase } from '../modules/BiometricAuth';
 import { startListening, stopListening } from '../storage/syncManager';
@@ -28,7 +27,9 @@ interface Props {
 
 export default function AuthScreen({ userId, onSuccess, onCancel }: Props) {
   const { hasPermission, requestPermission } = useCameraPermission();
-  const device = useCamera(hasPermission);
+  const frontDevice = useCameraDevice('front');
+  const backDevice = useCameraDevice('back');
+  const device = frontDevice ?? backDevice;
 
   const [authState, setAuthState] = useState<AuthState>(biometricAuth.getState());
   const [camReady, setCamReady] = useState(false);
